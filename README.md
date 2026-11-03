@@ -19,16 +19,52 @@
   - 手机来电响铃时弹出精简通知横幅（`{号码或联系人}` / `来电 · {归属地}`），并支持在 Mac 端一键挂断。
 - **真实设备信息面板**：实时展示手机电量与充电状态、局域网 ICMP 延迟、手机真实系统版本与硬件型号（如 `ColorOS 17 · PLK110` 及屏幕分辨率）以及手机端可传输共享文件统计。
 
+## 安装与使用（DMG 安装包）
+
+1. 前往 [Releases](../../releases) 页面下载最新版本的 `ColorDrop-v*-macOS-arm64.dmg` 安装镜像。
+2. 双击打开 DMG 镜像，将 **ColorDrop.app** 拖入右侧的 **Applications（应用程序）** 文件夹。
+3. **首次打开提示「已损坏」或「无法验证开发者」的解决方法**：
+   由于开源构建未绑定付费 Apple Developer ID 公证证书，macOS Gatekeeper 默认会拦截从浏览器下载的应用。打开「终端（Terminal）」执行以下命令清除隔离属性后即可正常打开：
+   ```bash
+   sudo xattr -rd com.apple.quarantine /Applications/ColorDrop.app
+   ```
+4. 如需在终端运行内置自检（安装在「应用程序」目录时）：
+   ```bash
+   /Applications/ColorDrop.app/Contents/MacOS/OppoLiteConnect --self-test
+   ```
+
+## 本地编译与运行
+
+### 环境要求
+
+- macOS 13.0 (Ventura) 及以上（Apple Silicon `arm64`）
+- Xcode Command Line Tools (`swiftc`)
+
+### 构建应用包
+
+在克隆后的仓库根目录下执行：
+
+```bash
+chmod +x build_app.sh
+./build_app.sh
+```
+
+构建完成后将在 `./dist/ColorDrop.app` 生成应用包（如需同时打包 DMG 可执行 `./build_app.sh --dmg`）。可通过以下命令运行内置自检：
+
+```bash
+./dist/ColorDrop.app/Contents/MacOS/OppoLiteConnect --self-test
+```
+
 ## 目录结构
 
 ```text
-OppoLiteConnect/
+ColorDrop/
 ├── Package.swift
 ├── README.md
 ├── build_app.sh
 └── Sources/
     └── OppoLiteConnect/
-        ├── OppoLiteConnectApp.swift          # 应用入口、菜单栏常驻与自检逻辑
+        ├── OppoLiteConnectApp.swift          # 应用入口、菜单栏常驻、Dock 唤醒与自检逻辑
         ├── Models/
         │   └── OppoModels.swift              # 设备、远端文件（含修改时间解析）、传输任务与通知模型
         ├── Protocol/
@@ -44,32 +80,12 @@ OppoLiteConnect/
             └── StatusBarDropController.swift # 状态栏拖拽感应悬浮小虚拟窗控制器
 ```
 
-## 本地编译与运行
-
-### 环境要求
-
-- macOS 13.0 (Ventura) 及以上（Apple Silicon `arm64`）
-- Xcode Command Line Tools (`swiftc`)
-
-### 构建应用包
-
-```bash
-chmod +x build_app.sh
-./build_app.sh
-```
-
-构建完成后将生成 `ColorDrop.app`，双击即可运行；也可通过命令行运行内置自检：
-
-```bash
-./ColorDrop.app/Contents/MacOS/OppoLiteConnect --self-test
-```
-
-## 免责声明与非官方声明 (Legal Disclaimer & Non-Affiliation Notice)
+## 免责声明与非官方声明
 
 1. **非官方独立项目**：本项目（**ColorDrop**）由个人开发者出于技术研究、学习交流与提升日常 macOS 桌面使用体验的目的独立开发，**与广东欧加控股有限公司（OPPO）、一加科技（OnePlus）、真我（Realme）及其任何关联公司不存在任何隶属、合作、赞助、授权、背书或官方关联**。
-2. **商标权归属**：「OPPO」、「OnePlus（一加）」、「Realme（真我）」、「ColorOS」、「OxygenOS」、「Realme UI」、「跨屏互联」、「O+ 互联（O+ Connect）」及相关图形、标识均为其各自合法权利人的注册商标或商标。本仓库及文档中提及上述名称，仅作为兼容性与适用设备范围的客观说明（Nominative Fair Use），不代表任何官方身份。
+2. **商标权归属**：「OPPO」、「OnePlus（一加）」、「Realme（真我）」、「ColorOS」、「OxygenOS」、「Realme UI」、「跨屏互联」、「O+ 互联」及相关图形、标识均为其各自合法权利人的注册商标或商标。本仓库及文档中提及上述名称，仅作为兼容性与适用设备范围的客观说明，不代表任何官方身份。
 3. **不包含受版权保护的第三方专有二进制文件**：本开源仓库仅提供 ColorDrop 原生 Swift 源代码与构建脚本，不分发任何第三方专有动态库、服务程序或数字证书。用户在本地构建或运行时如需调用相关底层协议组件，须自行确保已合法安装官方客户端并遵守其最终用户许可协议（EULA）。
-4. **按「原样」提供与使用风险自担**：本软件按「原样（AS IS）」免费开源提供，不附带任何明示或暗示的担保（包括但不限于适销性、特定用途适用性及不侵权担保）。在任何情况下，作者或贡献者均不对因使用或无法使用本软件而产生的任何直接、间接、偶然或数据丢失损失承担责任。
+4. **按「原样」提供与使用风险自担**：本软件按「原样」免费开源提供，不附带任何明示或暗示的担保（包括但不限于适销性、特定用途适用性及不侵权担保）。在任何情况下，作者或贡献者均不对因使用或无法使用本软件而产生的任何直接、间接、偶然或数据丢失损失承担责任。
 5. **严禁商业用途与侵权告知**：本项目严禁用于任何商业售卖、捆绑分发或违法违规用途。若相关权利人认为本仓库中的任何内容侵犯了您的合法权益，请通过 GitHub Issue 联系作者，我们将在收到通知后第一时间予以配合、修改或移除。
 
 ## 开源许可
