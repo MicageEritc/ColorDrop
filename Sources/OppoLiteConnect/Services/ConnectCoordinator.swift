@@ -381,11 +381,11 @@ public final class ConnectCoordinator: ObservableObject {
             return 0
         }()
         let osName: String = {
-            if opVerInt >= 130_000_000 {
-                let major = (opVerInt / 10_000_000) - 1
+            if opVerInt >= 100_000_000 {
+                let major = opVerInt / 10_000_000
                 return "ColorOS \(major)"
             }
-            return "ColorOS 16"
+            return "ColorOS 17"
         }()
         let info = (model: model, osName: osName, resolution: resolution)
         latestSwitchStatusFallback = info

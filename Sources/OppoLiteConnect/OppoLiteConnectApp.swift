@@ -72,13 +72,13 @@ public struct OppoLiteConnectApp {
             deviceName: "OnePlus 15",
             lanIP: "192.168.31.215",
             phoneModel: "PLK110",
-            osVersionName: "ColorOS 16",
+            osVersionName: "ColorOS 17",
             screenResolution: "1272*2772",
             indexedMediaBytes: 64_900_000_000,
             indexedMediaCount: 3842,
-            categoryBreakdownText: "图片 16.2 GB · 视频 48.0 GB · 文档与其它 700 MB"
+            categoryBreakdownText: "图片 16.2 GB · 视频 48.0 GB · 其它 700 MB"
         )
-        assert(sampleDev.formattedSystemValue == "ColorOS 16 · PLK110", "System version and model must match real phone switchStatus")
+        assert(sampleDev.formattedSystemValue == "ColorOS 17 · PLK110", "System version and model must match real phone switchStatus")
         print("4. 真实系统型号与共享文件统计校验通过: \(sampleDev.formattedSystemValue) (\(sampleDev.formattedSystemSubtitle)) | \(sampleDev.formattedStorageValue)")
 
         let oshare = OShareEngine.shared

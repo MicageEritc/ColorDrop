@@ -58,7 +58,7 @@ public struct OppoDevice: Identifiable, Hashable, Codable {
 
     /// 100% genuine OS & hardware model read from `switchStatus` (`OPverionCode` + `PhoneModel`).
     public var formattedSystemValue: String {
-        let osPart = (osVersionName?.isEmpty == false) ? osVersionName! : "ColorOS 16"
+        let osPart = (osVersionName?.isEmpty == false) ? osVersionName! : "ColorOS 17"
         if let model = phoneModel, !model.isEmpty {
             return "\(osPart) · \(model)"
         }
@@ -122,7 +122,7 @@ public struct OppoDevice: Identifiable, Hashable, Codable {
         ssid: String = "",
         batteryLevel: Int? = nil,
         isCharging: Bool = false,
-        systemVersion: String = "ColorOS 16 · ColorDrop v1.0.0",
+        systemVersion: String = "ColorOS 17 · ColorDrop v1.0.0",
         phoneModel: String? = nil,
         osVersionName: String? = nil,
         screenResolution: String? = nil,
