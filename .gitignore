@@ -1,0 +1,20 @@
+# macOS & Xcode
+.DS_Store
+.build/
+dist/
+build/
+DerivedData/
+*.xcuserdata
+ColorDrop/
+
+# Third-party proprietary runtime binaries & certificates (do not commit to public GitHub repo)
+Vendor/O+Connect Service
+Vendor/libOshareLib.dylib
+Vendor/OshareLibBundle.bundle/
+!Vendor/iconbase_192.png
+!Vendor/iconbase_raw_1024.png
+*.dmg
+*.dmg.sha256
+dsplogs/
+dsplogs-daemon/
+oppodat/

@@ -1,0 +1,73 @@
+name: Build and Release macOS DMG
+
+on:
+  release:
+    types: [published, created]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0)"
+        required: false
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-dmg:
+    name: Build ColorDrop.dmg (macOS arm64)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version & tag name
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RAW_TAG="${{ github.event.release.tag_name }}"
+          elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            RAW_TAG="${GITHUB_REF#refs/tags/}"
+          else
+            RAW_TAG="v${{ inputs.version || '1.0.0' }}"
+          fi
+          CLEAN_VER="${RAW_TAG#v}"
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=ColorDrop-${RAW_TAG}-macOS-arm64.dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Build ColorDrop.app & Package DMG
+        env:
+          CI: "true"
+          VERSION: ${{ steps.meta.outputs.version }}
+          DMG_PATH: ${{ github.workspace }}/dist/${{ steps.meta.outputs.dmg_name }}
+        run: |
+          chmod +x ./build_app.sh
+          ./build_app.sh --dmg
+
+      - name: Run Native Self-Test
+        run: |
+          ./dist/ColorDrop.app/Contents/MacOS/OppoLiteConnect --self-test
+
+      - name: Upload DMG to Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dmg_name }}
+          path: |
+            dist/${{ steps.meta.outputs.dmg_name }}
+            dist/${{ steps.meta.outputs.dmg_name }}.sha256
+
+      - name: Attach DMG to GitHub Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: |
+            dist/${{ steps.meta.outputs.dmg_name }}
+            dist/${{ steps.meta.outputs.dmg_name }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
