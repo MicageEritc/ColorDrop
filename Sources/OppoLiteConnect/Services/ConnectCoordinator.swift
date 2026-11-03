@@ -398,7 +398,7 @@ public final class ConnectCoordinator: ObservableObject {
             connectedDevice?.osVersionName = osName
             if !resolution.isEmpty { connectedDevice?.screenResolution = resolution }
             let modelSuffix = model.isEmpty ? "" : " · \(model)"
-            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.0.0"
+            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.0.1"
         }
     }
 

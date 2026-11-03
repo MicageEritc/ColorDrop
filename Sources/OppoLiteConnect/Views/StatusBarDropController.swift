@@ -3,8 +3,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Manages the floating drop zone ("小虚拟窗") near the ColorDrop Menu Bar icon
-/// whenever the user drags Mac files toward the top status bar.
-/// Dropping files into this mini-window sends them directly to `/storage/emulated/0/Download/ColorDrop`.
+/// whenever the user actively drags Mac files toward the top status bar.
+/// Clicking the status bar icon will NEVER trigger or flash this window because it verifies
+/// that `NSPasteboard(name: .drag).changeCount` incremented AFTER the mouse button was pressed
+/// and that the mouse has been dragged at least 16pt away from the click origin.
 @MainActor
 public final class StatusBarDropController: ObservableObject {
     public static let shared = StatusBarDropController()
@@ -14,11 +16,15 @@ public final class StatusBarDropController: ObservableObject {
 
     private var panel: NSPanel?
     private var globalDragMonitor: Any?
+    private var globalMouseDownMonitor: Any?
     private var globalMouseUpMonitor: Any?
     private var localDragMonitor: Any?
     private var pollTimer: Timer?
-    private var lastObservedDragChangeCount: Int = -1
+
+    private var idleDragChangeCount: Int = NSPasteboard(name: .drag).changeCount
+    private var activeDragSessionChangeCount: Int = -1
     private var cachedDragHasFiles: Bool = false
+    private var mouseDownStartLocation: NSPoint?
     private var isHidingAfterDrop: Bool = false
 
     private let panelWidth: CGFloat = 256
@@ -28,6 +34,18 @@ public final class StatusBarDropController: ObservableObject {
 
     public func startMonitoring() {
         guard pollTimer == nil else { return }
+        idleDragChangeCount = NSPasteboard(name: .drag).changeCount
+
+        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.mouseDownStartLocation = NSEvent.mouseLocation
+                // If the user is clicking near the top status bar, immediately hide any drop panel
+                if let screen = NSScreen.main, NSEvent.mouseLocation.y >= screen.frame.maxY - 36 {
+                    self.hideDropPanelImmediately()
+                }
+            }
+        }
 
         globalDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -41,12 +59,19 @@ public final class StatusBarDropController: ObservableObject {
             }
         }
 
-        localDragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+        localDragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             Task { @MainActor [weak self] in
-                if event.type == .leftMouseUp {
-                    self?.handleMouseReleased()
-                } else {
-                    self?.evaluateDragState()
+                guard let self else { return }
+                switch event.type {
+                case .leftMouseDown:
+                    self.mouseDownStartLocation = NSEvent.mouseLocation
+                    self.hideDropPanelImmediately()
+                case .leftMouseUp:
+                    self.handleMouseReleased()
+                case .leftMouseDragged:
+                    self.evaluateDragState()
+                default:
+                    break
                 }
             }
             return event
@@ -62,17 +87,47 @@ public final class StatusBarDropController: ObservableObject {
     private func evaluateDragState() {
         guard !isHidingAfterDrop else { return }
 
+        let pb = NSPasteboard(name: .drag)
         let mouseDown = (NSEvent.pressedMouseButtons & 1) != 0
+
         guard mouseDown else {
+            // Whenever the mouse button is not pressed, sync baseline changeCount so stale pasteboard data never triggers on click!
+            idleDragChangeCount = pb.changeCount
+            activeDragSessionChangeCount = -1
+            cachedDragHasFiles = false
+            mouseDownStartLocation = nil
             if panel?.isVisible == true && !isHoveringDropZone {
                 hideDropPanel()
             }
             return
         }
 
-        let pb = NSPasteboard(name: .drag)
-        if pb.changeCount != lastObservedDragChangeCount {
-            lastObservedDragChangeCount = pb.changeCount
+        let mouseLoc = NSEvent.mouseLocation
+        if mouseDownStartLocation == nil {
+            mouseDownStartLocation = mouseLoc
+        }
+
+        // Require actual drag movement (>= 16pt) from where the mouse was pressed
+        if let start = mouseDownStartLocation {
+            let dist = hypot(mouseLoc.x - start.x, mouseLoc.y - start.y)
+            if dist < 16 {
+                return
+            }
+            // If the drag started inside the top menu bar itself (e.g. clicking status bar icon), never treat as file drag
+            if let screen = NSScreen.screens.first(where: { NSMouseInRect(start, $0.frame, false) }) ?? NSScreen.main,
+               start.y >= screen.frame.maxY - 32 {
+                return
+            }
+        }
+
+        // Only recognize a drag if NSPasteboard(name: .drag).changeCount advanced AFTER the mouse was pressed!
+        guard pb.changeCount > idleDragChangeCount else {
+            hideDropPanel()
+            return
+        }
+
+        if pb.changeCount != activeDragSessionChangeCount {
+            activeDragSessionChangeCount = pb.changeCount
             cachedDragHasFiles = Self.pasteboardContainsFileURLs(pb)
         }
 
@@ -81,7 +136,6 @@ public final class StatusBarDropController: ObservableObject {
             return
         }
 
-        let mouseLoc = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) ?? NSScreen.main else {
             return
         }
@@ -102,13 +156,23 @@ public final class StatusBarDropController: ObservableObject {
     }
 
     private func handleMouseReleased() {
+        mouseDownStartLocation = nil
+        idleDragChangeCount = NSPasteboard(name: .drag).changeCount
+        activeDragSessionChangeCount = -1
+        cachedDragHasFiles = false
         guard !isHidingAfterDrop else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, !self.isHidingAfterDrop else { return }
             if (NSEvent.pressedMouseButtons & 1) == 0 {
                 self.hideDropPanel()
             }
         }
+    }
+
+    public func hideDropPanelImmediately() {
+        isHoveringDropZone = false
+        panel?.alphaValue = 0.0
+        panel?.orderOut(nil)
     }
 
     private static func pasteboardContainsFileURLs(_ pb: NSPasteboard) -> Bool {
@@ -158,7 +222,7 @@ public final class StatusBarDropController: ObservableObject {
         isHoveringDropZone = false
         guard let panel, panel.isVisible else { return }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.15
+            ctx.duration = 0.14
             panel.animator().alphaValue = 0.0
         }, completionHandler: {
             Task { @MainActor in
@@ -308,7 +372,7 @@ public struct StatusBarDropFloatingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(NSColor.windowBackgroundColor).opacity(0.96))
+                .fill(Color.white)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -321,5 +385,6 @@ public struct StatusBarDropFloatingView: View {
                 )
         )
         .padding(4)
+        .environment(\.colorScheme, .light)
     }
 }

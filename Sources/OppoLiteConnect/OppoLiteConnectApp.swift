@@ -19,7 +19,7 @@ public struct OppoLiteConnectApp {
     }
 
     private static func runSelfTest() {
-        print("=== ColorDrop v1.0.0 原生自检 ===")
+        print("=== ColorDrop v1.0.1 原生自检 ===")
         let discovery = LanSdpDiscovery()
         print("1. 本地设备 ID: \(discovery.localDeviceId) | 局域网 IP: \(discovery.localIPv4) | 本机IP过滤校验: \(discovery.isSelfAddress(discovery.localIPv4))")
         assert(discovery.isSelfAddress(discovery.localIPv4), "Must filter out Mac's own IP address")
@@ -101,15 +101,64 @@ public struct OppoLiteConnectApp {
 
         let memMB = MemoryTelemetry.currentFootprintMB()
         print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
-        print("=== 全部自检通过 (v1.0.0) ===")
+        print("=== 全部自检通过 (v1.0.1) ===")
+    }
+}
+
+/// Handles Dock icon clicks (`applicationShouldHandleReopen`) and hides the main window cleanly on red `x` click
+/// so clicking the Dock icon always reopens the main window immediately.
+public final class ColorDropAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    public static let shared = ColorDropAppDelegate()
+    public weak var mainWindow: NSWindow?
+
+    public func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.appearance = NSAppearance(named: .aqua)
+    }
+
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // Hide the main window instead of destroying its SwiftUI scene so Dock icon click can always restore it
+        sender.orderOut(nil)
+        return false
+    }
+
+    public func showMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let win = mainWindow ?? findExistingMainWindow() {
+            mainWindow = win
+            if win.isMiniaturized {
+                win.deminiaturize(nil)
+            }
+            win.makeKeyAndOrderFront(nil)
+            win.orderFrontRegardless()
+        }
+    }
+
+    public func findExistingMainWindow() -> NSWindow? {
+        NSApplication.shared.windows.first { win in
+            let className = String(describing: type(of: win))
+            guard !className.contains("StatusBar"),
+                  !className.contains("MenuBar"),
+                  !className.contains("Popup"),
+                  !className.contains("Panel") else {
+                return false
+            }
+            return win.title == "ColorDrop" || win.identifier?.rawValue.contains("main") == true || win.frame.width >= 600
+        }
     }
 }
 
 public struct ColorDropGUIApp: App {
+    @NSApplicationDelegateAdaptor(ColorDropAppDelegate.self) private var appDelegate
     @StateObject private var coordinator = ConnectCoordinator.shared
 
     public init() {
         NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.appearance = NSAppearance(named: .aqua)
         Self.applyCustomIconIfAvailable()
     }
 

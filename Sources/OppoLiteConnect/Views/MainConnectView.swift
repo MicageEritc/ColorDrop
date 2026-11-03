@@ -84,13 +84,22 @@ public struct WindowTitlebarCleaner: NSViewRepresentable {
               !className.contains("Panel") else {
             return
         }
+        if !window.styleMask.contains(.fullSizeContentView) {
+            window.styleMask.insert(.fullSizeContentView)
+        }
         if window.titlebarSeparatorStyle != .none {
             window.titlebarSeparatorStyle = .none
         }
         if !window.titlebarAppearsTransparent {
             window.titlebarAppearsTransparent = true
         }
+        window.backgroundColor = .white
+        window.appearance = NSAppearance(named: .aqua)
         window.isMovableByWindowBackground = false
+        if window.delegate !== ColorDropAppDelegate.shared {
+            window.delegate = ColorDropAppDelegate.shared
+        }
+        ColorDropAppDelegate.shared.mainWindow = window
         hideTitlebarDecorationViews(in: window)
     }
 
@@ -153,10 +162,10 @@ public struct MainConnectView: View {
                 .ignoresSafeArea(.container, edges: .vertical)
 
             VStack(spacing: 0) {
-                // Fixed non-scrolling top titlebar safe-area cover so ScrollView NEVER touches the titlebar boundary
+                // Fixed non-scrolling top spacer so ScrollView NEVER touches the titlebar boundary
                 Rectangle()
-                    .fill(Color(NSColor.windowBackgroundColor))
-                    .frame(height: 28)
+                    .fill(Color.white)
+                    .frame(height: 2)
 
                 if let activeCall = coordinator.activeIncomingCall {
                     incomingCallTopBanner(activeCall)
@@ -182,8 +191,7 @@ public struct MainConnectView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            .background(Color(NSColor.windowBackgroundColor))
-            .ignoresSafeArea(.container, edges: .vertical)
+            .background(Color.white)
             .background(WindowTitlebarCleaner())
             .onDrop(of: [.fileURL], isTargeted: $coordinator.isDropTargeted) { providers in
                 handleDroppedProviders(providers)
@@ -207,6 +215,7 @@ public struct MainConnectView: View {
             }
         }
         .tint(.blue)
+        .environment(\.colorScheme, .light)
         .frame(minWidth: 760, minHeight: 480)
         .alert(coordinator.deleteConfirmationTitle, isPresented: $coordinator.showDeleteConfirmation) {
             Button("取消", role: .cancel) {
@@ -264,7 +273,7 @@ public struct MainConnectView: View {
             .padding(.horizontal, 10)
             .padding(.bottom, 12)
         }
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.55))
+        .background(Color(red: 0.973, green: 0.976, blue: 0.984))
     }
 
     private func sidebarNavRow(tab: NavigationTab, badgeCount: Int) -> some View {
@@ -354,7 +363,7 @@ public struct MainConnectView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(Color.white)
         .overlay(alignment: .bottom) {
             Divider().opacity(0.45)
         }
@@ -479,7 +488,7 @@ public struct MainConnectView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(NSColor.controlBackgroundColor))
+            .background(Color.white)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -559,7 +568,7 @@ public struct MainConnectView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(Color.white)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -787,7 +796,7 @@ public struct MainConnectView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(Color.white)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -940,7 +949,7 @@ public struct MainConnectView: View {
                                         .padding(.vertical, 5)
                                         .background(
                                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(Color(NSColor.windowBackgroundColor))
+                                                .fill(Color.white)
                                                 .overlay(
                                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                                                         .stroke(Color.primary.opacity(0.15), lineWidth: 1)
@@ -1077,6 +1086,8 @@ public struct MainConnectView: View {
         }
         .padding(14)
         .frame(width: 310)
+        .background(Color.white)
+        .environment(\.colorScheme, .light)
     }
 
     // MARK: - 4. Messages Page (`消息`)
@@ -1146,7 +1157,7 @@ public struct MainConnectView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(Color.white)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -1310,7 +1321,7 @@ public struct MainConnectView: View {
                     .frame(width: 84, height: 84)
 
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(NSColor.windowBackgroundColor))
+                    .fill(Color.white)
                     .frame(width: 48, height: 38)
                     .shadow(color: Color.black.opacity(0.06), radius: 6, y: 3)
                     .overlay {
@@ -1358,7 +1369,7 @@ public struct MainConnectView: View {
                 Text("设置")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Text("ColorDrop v1.0.0")
+                Text("ColorDrop v1.0.1")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1484,7 +1495,7 @@ public struct MainConnectView: View {
             .padding(.vertical, 14)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(Color.white)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)

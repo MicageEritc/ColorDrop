@@ -66,7 +66,11 @@ public struct MenuBarConnectView: View {
                     .padding(.vertical, 10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            .fill(Color.white)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            )
                     )
                 }
                 .buttonStyle(.plain)
@@ -85,7 +89,11 @@ public struct MenuBarConnectView: View {
                     .padding(.vertical, 10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            .fill(Color.white)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            )
                     )
                 }
                 .buttonStyle(.plain)
@@ -184,7 +192,7 @@ public struct MenuBarConnectView: View {
 
             Divider().opacity(0.45)
 
-            // 4. Bottom Footer (`自动连接 · 默认发送至 Download/ColorDrop` + `主界面`)
+            // 4. Bottom Footer (`默认发送至 Download/ColorDrop` + `主界面`)
             HStack(spacing: 8) {
                 Text("默认发送至 Download/ColorDrop")
                     .font(.system(size: 11))
@@ -203,7 +211,11 @@ public struct MenuBarConnectView: View {
                         .padding(.vertical, 5)
                         .background(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                                .fill(Color.white)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                                )
                         )
                 }
                 .buttonStyle(.plain)
@@ -212,6 +224,11 @@ public struct MenuBarConnectView: View {
             .padding(.vertical, 12)
         }
         .frame(width: 296)
+        .background(Color.white)
+        .environment(\.colorScheme, .light)
+        .onAppear {
+            StatusBarDropController.shared.hideDropPanelImmediately()
+        }
         .onDrop(of: [.fileURL], isTargeted: $coordinator.isMenuBarDropTargeted) { providers in
             handleMenuBarDrop(providers)
         }
@@ -270,25 +287,13 @@ public struct MenuBarConnectView: View {
     /// Reuses an existing main window if present; only calls `openWindow(id: "main")` when no main window exists.
     private func focusOrOpenSingleMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        let existingMainWindows = NSApplication.shared.windows.filter { win in
-            let className = String(describing: type(of: win))
-            guard !className.contains("StatusBar"),
-                  !className.contains("Popup"),
-                  !className.contains("Panel"),
-                  win.canBecomeMain else {
-                return false
-            }
-            return win.title == "ColorDrop" || win.identifier?.rawValue.contains("main") == true || win.frame.width >= 600
-        }
-
-        if let primary = existingMainWindows.first {
+        if let primary = ColorDropAppDelegate.shared.mainWindow ?? ColorDropAppDelegate.shared.findExistingMainWindow() {
+            ColorDropAppDelegate.shared.mainWindow = primary
             if primary.isMiniaturized {
                 primary.deminiaturize(nil)
             }
             primary.makeKeyAndOrderFront(nil)
-            for duplicate in existingMainWindows.dropFirst() {
-                duplicate.close()
-            }
+            primary.orderFrontRegardless()
         } else {
             openWindow(id: "main")
         }
