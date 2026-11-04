@@ -1369,7 +1369,7 @@ public struct MainConnectView: View {
                 Text("设置")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Text("ColorDrop v1.0.1")
+                Text("ColorDrop v1.0.2")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }

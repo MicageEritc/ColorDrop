@@ -19,7 +19,7 @@ public struct OppoLiteConnectApp {
     }
 
     private static func runSelfTest() {
-        print("=== ColorDrop v1.0.1 原生自检 ===")
+        print("=== ColorDrop v1.0.2 原生自检 ===")
         let discovery = LanSdpDiscovery()
         print("1. 本地设备 ID: \(discovery.localDeviceId) | 局域网 IP: \(discovery.localIPv4) | 本机IP过滤校验: \(discovery.isSelfAddress(discovery.localIPv4))")
         assert(discovery.isSelfAddress(discovery.localIPv4), "Must filter out Mac's own IP address")
@@ -103,7 +103,7 @@ public struct OppoLiteConnectApp {
 
         let memMB = MemoryTelemetry.currentFootprintMB()
         print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
-        print("=== 全部自检通过 (v1.0.1) ===")
+        print("=== 全部自检通过 (v1.0.2) ===")
     }
 }
 

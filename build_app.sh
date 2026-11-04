@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
-VERSION="${VERSION:-1.0.1}"
+VERSION="${VERSION:-1.0.2}"
 
 if [ -z "${APP_BUNDLE:-}" ]; then
     if [ "${CI:-false}" != "true" ] && [ -d "/Users/micage/Documents/Gemini" ] && [ -w "/Users/micage/Documents/Gemini" ]; then

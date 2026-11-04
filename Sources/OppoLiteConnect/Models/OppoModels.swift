@@ -68,9 +68,9 @@ public struct OppoDevice: Identifiable, Hashable, Codable {
     public var formattedSystemSubtitle: String {
         if let res = screenResolution, !res.isEmpty {
             let cleanRes = res.replacingOccurrences(of: "*", with: " × ")
-            return "分辨率 \(cleanRes) · ColorDrop v1.0.1"
+            return "分辨率 \(cleanRes) · ColorDrop v1.0.2"
         }
-        return "跨屏互联协议已就绪 · ColorDrop v1.0.1"
+        return "跨屏互联协议已就绪 · ColorDrop v1.0.2"
     }
 
     public var formattedStorageCardTitle: String {
@@ -122,7 +122,7 @@ public struct OppoDevice: Identifiable, Hashable, Codable {
         ssid: String = "",
         batteryLevel: Int? = nil,
         isCharging: Bool = false,
-        systemVersion: String = "ColorOS 17 · ColorDrop v1.0.1",
+        systemVersion: String = "ColorOS 17 · ColorDrop v1.0.2",
         phoneModel: String? = nil,
         osVersionName: String? = nil,
         screenResolution: String? = nil,
