@@ -5,6 +5,7 @@ import AppKit
 public enum NavigationTab: String, CaseIterable, Identifiable {
     case connect = "设备"
     case transfer = "传输"
+    case clipboard = "剪切板"
     case sms = "消息"
     case settings = "设置"
 
@@ -14,6 +15,7 @@ public enum NavigationTab: String, CaseIterable, Identifiable {
         switch self {
         case .connect: return "iphone"
         case .transfer: return "arrow.left.arrow.right"
+        case .clipboard: return "doc.on.clipboard"
         case .sms: return "bubble.left"
         case .settings: return "gearshape"
         }
@@ -54,12 +56,22 @@ public final class ConnectCoordinator: ObservableObject {
     @Published public var receiveDirectoryPath: String = ""
     @Published public var localFilesRevision: Int = 0
 
+    // Cross-Device Clipboard History ("剪切板")
+    @Published public var clipboardItems: [ClipboardHistoryItem] = [] {
+        didSet {
+            saveClipboardHistory()
+        }
+    }
+    @Published public var copiedClipboardItemId: String?
+    @Published public var showClearClipboardConfirmation: Bool = false
+
     // Messages & Incoming Phone Call Notifications ("消息")
     @Published public var smsMessages: [SMSNotificationItem] = [] {
         didSet {
             saveMessageHistory()
         }
     }
+    @Published public var showClearMessagesConfirmation: Bool = false
     @Published public var activeIncomingCall: IncomingCallItem?
     @Published public var autoCopyVerificationCode: Bool = true {
         didSet {
@@ -165,11 +177,17 @@ public final class ConnectCoordinator: ObservableObject {
         transferTasks.filter { $0.state == .transferring || $0.state == .pending }.count
     }
 
+    public let callAudioService = CallAudioRelayService.shared
+
     private let discovery = LanSdpDiscovery()
     private let dspClient = DspIPCClient.shared
     private let oshare = OShareEngine.shared
     private let smsService = SMSNotificationService.shared
     private var memoryTimer: Timer?
+    private var clipboardMonitorTimer: Timer?
+    private var lastObservedPasteboardChangeCount: Int = NSPasteboard.general.changeCount
+    private var lastSelfWrittenPasteboardChangeCount: Int = -1
+    private var lastSyncedClipboardText: String = ""
     private var isDaemonInitialized = false
     private var lastAutoConnectAttemptByDevice: [String: Date] = [:]
     private var lastHandshakeTime: Date = .distantPast
@@ -196,6 +214,7 @@ public final class ConnectCoordinator: ObservableObject {
     private let lastConnectedIdDefaultsKey = "ColorDrop.LastConnectedDeviceId"
     private let manualDisconnectDefaultsKey = "ColorDrop.UserManuallyDisconnected"
     private let messageHistoryFilePath = "/tmp/oppolite-oppodat/message_history.json"
+    private let clipboardHistoryFilePath = "/tmp/oppolite-oppodat/clipboard_history.json"
 
     private var pairedDeviceIds: Set<String> = []
     private var knownDeviceIdByIP: [String: String] = [:]
@@ -216,6 +235,7 @@ public final class ConnectCoordinator: ObservableObject {
         self.receiveDirectoryPath = oshare.receiveDirectory.path
         loadPairedDeviceHistory()
         loadMessageHistory()
+        loadClipboardHistory()
         seedRecentDeviceAndBatteryStateFromDaemonLog()
 
         self.currentSSID = discovery.currentSSID
@@ -404,7 +424,7 @@ public final class ConnectCoordinator: ObservableObject {
             connectedDevice?.osVersionName = osName
             if !resolution.isEmpty { connectedDevice?.screenResolution = resolution }
             let modelSuffix = model.isEmpty ? "" : " · \(model)"
-            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.0.3"
+            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.1.0"
         }
     }
 
@@ -421,6 +441,21 @@ public final class ConnectCoordinator: ObservableObject {
         let snapshot = Array(smsMessages.prefix(50))
         if let encoded = try? JSONEncoder().encode(snapshot) {
             try? encoded.write(to: URL(fileURLWithPath: messageHistoryFilePath), options: .atomic)
+        }
+    }
+
+    private func loadClipboardHistory() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: clipboardHistoryFilePath)),
+              let decoded = try? JSONDecoder().decode([ClipboardHistoryItem].self, from: data) else {
+            return
+        }
+        self.clipboardItems = decoded.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func saveClipboardHistory() {
+        let snapshot = Array(clipboardItems.prefix(100))
+        if let encoded = try? JSONEncoder().encode(snapshot) {
+            try? encoded.write(to: URL(fileURLWithPath: clipboardHistoryFilePath), options: .atomic)
         }
     }
 
@@ -684,7 +719,38 @@ public final class ConnectCoordinator: ObservableObject {
         smsService.onActiveCallChanged = { [weak self] callItem in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.activeIncomingCall = callItem
+                if var incoming = callItem {
+                    if let current = self.activeIncomingCall, current.id == incoming.id, current.isAnsweredOnMac {
+                        incoming.isAnsweredOnMac = true
+                        incoming.connectedAt = current.connectedAt ?? Date()
+                        incoming.activeAudioDeviceName = self.callAudioService.activeInputDeviceName
+                    }
+                    self.activeIncomingCall = incoming
+                } else {
+                    self.callAudioService.stopCallRelay()
+                    self.activeIncomingCall = nil
+                }
+            }
+        }
+
+        smsService.onAnswerCallRequested = { [weak self] callId, number in
+            Task { @MainActor [weak self] in
+                self?.answerCurrentCallOnMac(explicitCallId: callId, explicitNumber: number)
+            }
+        }
+
+        smsService.onHangupCallRequested = { [weak self] callId, number in
+            Task { @MainActor [weak self] in
+                self?.hangupCurrentCall(explicitCallId: callId, explicitNumber: number)
+            }
+        }
+
+        callAudioService.onAudioRouteChanged = { [weak self] inputName, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.activeIncomingCall != nil {
+                    self.activeIncomingCall?.activeAudioDeviceName = inputName
+                }
             }
         }
 
@@ -1408,6 +1474,22 @@ public final class ConnectCoordinator: ObservableObject {
             } else if let payload = msgJson["value"] as? [String: Any] {
                 applySwitchStatusPayload(payload)
             }
+            Task {
+                await dspClient.sendClipboardSyncState(enabled: true, isFirstTime: true)
+            }
+            return
+        }
+        if key == "clipboard_state_first_time" || key == "clipboard_state_active" {
+            Task {
+                await dspClient.sendClipboardSyncState(enabled: true, isFirstTime: false)
+            }
+            return
+        }
+        if key == "clipboard_data" {
+            if let rawVal = msgJson["value"],
+               let extractedText = DspIPCClient.extractClipboardText(from: rawVal) {
+                handleRemoteClipboardReceived(extractedText)
+            }
             return
         }
         if key == "incallui_info" {
@@ -1445,6 +1527,7 @@ public final class ConnectCoordinator: ObservableObject {
         dspClient.ensureCoreDaemonRunning()
         discovery.start()
         StatusBarDropController.shared.startMonitoring()
+        startClipboardMonitoringIfNeeded()
 
         memoryTimer?.invalidate()
         memoryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
@@ -2137,7 +2220,7 @@ public final class ConnectCoordinator: ObservableObject {
     }
 
     public func copyVerificationCode(_ code: String, messageId: String? = nil) {
-        smsService.copyToClipboard(code)
+        writeToMacPasteboardWithoutEcho(code)
         lastCopiedCode = code
         if let mid = messageId {
             copiedMessageId = mid
@@ -2163,18 +2246,220 @@ public final class ConnectCoordinator: ObservableObject {
         }
     }
 
+    public func requestClearAllMessages() {
+        guard !smsMessages.isEmpty else { return }
+        showClearMessagesConfirmation = true
+    }
+
+    public func confirmClearAllMessages() {
+        showClearMessagesConfirmation = false
+        clearAllMessages()
+    }
+
+    public func cancelClearAllMessages() {
+        showClearMessagesConfirmation = false
+    }
+
     public func clearAllMessages() {
         smsMessages.removeAll()
         expandedMessageIds.removeAll()
         try? FileManager.default.removeItem(atPath: messageHistoryFilePath)
+        statusBanner = "已清空全部消息记录"
     }
 
-    public func hangupCurrentCall() {
-        guard let call = activeIncomingCall else { return }
+    // MARK: - Cross-Device Clipboard Sync & History Actions
+
+    private func startClipboardMonitoringIfNeeded() {
+        guard clipboardMonitorTimer == nil else { return }
+        lastObservedPasteboardChangeCount = NSPasteboard.general.changeCount
+        if let initialStr = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !initialStr.isEmpty {
+            lastSyncedClipboardText = initialStr
+        }
+
+        clipboardMonitorTimer = Timer.scheduledTimer(withTimeInterval: 0.65, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pollLocalMacPasteboard()
+            }
+        }
+    }
+
+    private func pollLocalMacPasteboard() {
+        let pb = NSPasteboard.general
+        let currentCount = pb.changeCount
+        guard currentCount != lastObservedPasteboardChangeCount else { return }
+        lastObservedPasteboardChangeCount = currentCount
+
+        guard currentCount != lastSelfWrittenPasteboardChangeCount else {
+            return
+        }
+        guard let rawText = pb.string(forType: .string) else { return }
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, rawText != lastSyncedClipboardText else { return }
+        lastSyncedClipboardText = rawText
+
+        let macName = Host.current().localizedName ?? "Mac"
+        upsertClipboardHistoryItem(
+            content: rawText,
+            source: .mac,
+            deviceName: macName
+        )
+
+        if connectedDevice != nil {
+            Task {
+                await dspClient.sendClipboardToPhone(text: rawText)
+            }
+        }
+    }
+
+    private func handleRemoteClipboardReceived(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lastSyncedClipboardText = text
+        writeToMacPasteboardWithoutEcho(text)
+
+        let phoneName = connectedDevice?.deviceName ?? "手机"
+        upsertClipboardHistoryItem(
+            content: text,
+            source: .phone,
+            deviceName: phoneName
+        )
+        statusBanner = "已从 \(phoneName) 同步剪切板内容"
+    }
+
+    private func writeToMacPasteboardWithoutEcho(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        lastSelfWrittenPasteboardChangeCount = pb.changeCount
+        lastObservedPasteboardChangeCount = pb.changeCount
+    }
+
+    public func upsertClipboardHistoryItem(
+        content: String,
+        source: ClipboardItemSource,
+        deviceName: String
+    ) {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        clipboardItems.removeAll { $0.content == content }
+        let newItem = ClipboardHistoryItem(
+            content: content,
+            source: source,
+            deviceName: deviceName,
+            createdAt: Date()
+        )
+        clipboardItems.insert(newItem, at: 0)
+        if clipboardItems.count > 100 {
+            clipboardItems = Array(clipboardItems.prefix(100))
+        }
+    }
+
+    public func copyClipboardHistoryItem(_ item: ClipboardHistoryItem) {
+        lastSyncedClipboardText = item.content
+        writeToMacPasteboardWithoutEcho(item.content)
+        copiedClipboardItemId = item.id
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if self?.copiedClipboardItemId == item.id {
+                self?.copiedClipboardItemId = nil
+            }
+        }
+        if connectedDevice != nil {
+            Task {
+                await dspClient.sendClipboardToPhone(text: item.content)
+            }
+            statusBanner = "已复制到剪贴板并同步至手机"
+        } else {
+            statusBanner = "已复制到 Mac 剪贴板"
+        }
+    }
+
+    public func deleteClipboardHistoryItem(_ item: ClipboardHistoryItem) {
+        clipboardItems.removeAll { $0.id == item.id }
+        statusBanner = "已删除该条剪切板记录"
+    }
+
+    public func requestClearClipboardHistory() {
+        guard !clipboardItems.isEmpty else { return }
+        showClearClipboardConfirmation = true
+    }
+
+    public func confirmClearClipboardHistory() {
+        showClearClipboardConfirmation = false
+        clipboardItems.removeAll()
+        try? FileManager.default.removeItem(atPath: clipboardHistoryFilePath)
+        statusBanner = "已清空全部剪切板记录"
+    }
+
+    public func cancelClearClipboardHistory() {
+        showClearClipboardConfirmation = false
+    }
+
+    // MARK: - Incoming Call Answer (Mac Microphone / Headphone Relay) & Hangup
+
+    public func answerCurrentCallOnMac(explicitCallId: String? = nil, explicitNumber: String? = nil) {
+        callAudioService.refreshAudioDeviceRoute()
+        let micName = callAudioService.activeInputDeviceName
+
+        if var call = activeIncomingCall {
+            call.callState = 3
+            call.isAnsweredOnMac = true
+            call.connectedAt = Date()
+            call.activeAudioDeviceName = micName
+            activeIncomingCall = call
+            callAudioService.startCallRelay(phoneIP: connectedDevice?.lanIP ?? "")
+            statusBanner = "已接听 \(call.displayTitle) · 正在使用 \(micName) 通话"
+            let notifyKey = smsService.latestCallNotificationKey
+            Task {
+                await dspClient.answerIncomingCall(
+                    callId: call.id,
+                    phoneNumber: call.number,
+                    notificationKey: notifyKey
+                )
+            }
+        } else if let cid = explicitCallId {
+            let num = explicitNumber ?? ""
+            let fallbackCall = IncomingCallItem(
+                id: cid,
+                number: num,
+                callerDisplayName: num,
+                location: "",
+                callState: 3,
+                receivedAt: Date(),
+                isAnsweredOnMac: true,
+                connectedAt: Date(),
+                activeAudioDeviceName: micName
+            )
+            activeIncomingCall = fallbackCall
+            callAudioService.startCallRelay(phoneIP: connectedDevice?.lanIP ?? "")
+            statusBanner = "已接听 · 正在使用 \(micName) 通话"
+            let notifyKey = smsService.latestCallNotificationKey
+            Task {
+                await dspClient.answerIncomingCall(
+                    callId: cid,
+                    phoneNumber: num,
+                    notificationKey: notifyKey
+                )
+            }
+        }
+    }
+
+    public func toggleCallMicrophoneMute() {
+        callAudioService.toggleMicrophoneMute()
+        let muted = callAudioService.isMicrophoneMuted
+        statusBanner = muted ? "通话麦克风已静音" : "通话麦克风已取消静音 (\(callAudioService.activeInputDeviceName))"
+    }
+
+    public func hangupCurrentCall(explicitCallId: String? = nil, explicitNumber: String? = nil) {
+        let callId = explicitCallId ?? activeIncomingCall?.id ?? "DialerCall"
+        let number = explicitNumber ?? activeIncomingCall?.number ?? ""
+        let title = activeIncomingCall?.displayTitle ?? (number.isEmpty ? "当前通话" : number)
+        callAudioService.stopCallRelay()
         activeIncomingCall = nil
-        statusBanner = "已挂断 \(call.displayTitle) 的来电"
+        statusBanner = "已挂断 \(title) 的通话"
         Task {
-            await dspClient.hangupIncomingCall(callId: call.id, phoneNumber: call.number)
+            await dspClient.hangupIncomingCall(callId: callId, phoneNumber: number)
         }
     }
 }

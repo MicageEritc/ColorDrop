@@ -992,6 +992,123 @@ public final class DspIPCClient: @unchecked Sendable {
             key: "HeySynergy_Notification_Error",
             value: ""
         )
+
+        // Announce PC capabilities & activate bidirectional cross-device clipboard sync (`crossdeviceClipboardVersion: 1200`)
+        await sendClipboardSyncState(appId: appId, enabled: true, isFirstTime: true)
+    }
+
+    public func sendClipboardSyncState(appId: Int? = nil, enabled: Bool = true, isFirstTime: Bool = false) async {
+        let abilityDict: [String: Any] = [
+            "PCVersion": "17.20.0",
+            "CastAbility": "1000",
+            "GameCastAbility": "1000",
+            "Synergy_CastUnlock_Version": 2000,
+            "crossdeviceClipboardVersion": "1200",
+            "ScreenShareAbility": "0",
+            "Notice_ClipBoard": enabled ? 1 : 0,
+            "Notice_CrossDevice": 1,
+            "Notice_MaterialFlow": 1,
+            "ScreenShareArrange": 0,
+            "Synergy_CastUnlock_Mode": "auto",
+            "OSType": "macos",
+            "OSVersion": "15.0"
+        ]
+        await publishMessage(appId: appId, topicName: "Oplus_MacConnect", key: "pcAbility", value: abilityDict)
+
+        let stateDict: [String: Any] = [
+            "crossdeviceClipboardVersion": "1200",
+            "source": "macos",
+            "state": enabled ? 1 : 0
+        ]
+        if let stateData = try? JSONSerialization.data(withJSONObject: stateDict),
+           let stateStr = String(data: stateData, encoding: .utf8) {
+            if isFirstTime {
+                await publishMessage(
+                    appId: appId,
+                    topicName: "Oplus_MacConnect",
+                    key: "clipboard_state_first_time",
+                    value: stateStr
+                )
+            }
+            await publishMessage(
+                appId: appId,
+                topicName: "Oplus_MacConnect",
+                key: "clipboard_state_active",
+                value: stateStr
+            )
+        }
+    }
+
+    /// Sends Mac clipboard text to the connected phone via `Oplus_MacConnect` (`key: "clipboard_data"`).
+    /// Matches `clipboard::clipboard_common::common_json::JsonCommonData` schema (`crossdeviceClipboardVersion: "1200"`).
+    public func sendClipboardToPhone(text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let payload = Self.buildClipboardDataPayload(text: text)
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let jsonString = String(data: data, encoding: .utf8) else {
+            return
+        }
+        await publishMessage(topicName: "Oplus_MacConnect", key: "clipboard_data", value: jsonString)
+    }
+
+    public static func buildClipboardDataPayload(text: String) -> [String: Any] {
+        let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
+        return [
+            "crossdeviceClipboardVersion": "1200",
+            "timestamp": timestampMs,
+            "source": "macos",
+            "data": [
+                "text": [
+                    "content": text,
+                    "encoding": "UTF-8"
+                ],
+                "html": NSNull(),
+                "htmlData": NSNull(),
+                "image": NSNull(),
+                "files": NSNull()
+            ]
+        ]
+    }
+
+    /// Extracts plain text content from an incoming `clipboard_data` payload sent by the phone.
+    public static func extractClipboardText(from rawValue: Any) -> String? {
+        let dict: [String: Any]?
+        if let d = rawValue as? [String: Any] {
+            dict = d
+        } else if let str = rawValue as? String,
+                  let data = str.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            dict = parsed
+        } else {
+            dict = nil
+        }
+        guard let dict else { return nil }
+
+        // Ignore self-originated macOS clipboard payloads
+        if let source = (dict["source"] as? String)?.lowercased(), source == "macos" || source == "mac" {
+            return nil
+        }
+
+        if let dataObj = dict["data"] as? [String: Any] {
+            if let textObj = dataObj["text"] as? [String: Any],
+               let content = textObj["content"] as? String,
+               !content.isEmpty {
+                return content
+            }
+            if let textStr = dataObj["text"] as? String, !textStr.isEmpty {
+                return textStr
+            }
+        }
+        if let textObj = dict["text"] as? [String: Any],
+           let content = textObj["content"] as? String,
+           !content.isEmpty {
+            return content
+        }
+        if let directContent = dict["content"] as? String, !directContent.isEmpty {
+            return directContent
+        }
+        return nil
     }
 
     public func publishMessage(appId: Int? = nil, topicName: String, key: String, value: Any) async {
@@ -1006,6 +1123,30 @@ public final class DspIPCClient: @unchecked Sendable {
             "msg": msgJsonStr
         ])
         _ = try? await request(path: uri)
+    }
+
+    /// Sends one-click call answer (`actionType = 0` + notification action click + audio handoff) to the phone.
+    public func answerIncomingCall(callId: String, phoneNumber: String, notificationKey: String? = nil) async {
+        let answerValue: [String: Any] = [
+            "id": callId,
+            "number": phoneNumber,
+            "actionType": 0,
+            "audio_device": "mac",
+            "msg": ""
+        ]
+        await publishMessage(topicName: "Oplus_MacConnect", key: "incallui_reply", value: answerValue)
+
+        if let notifyKey = notificationKey, !notifyKey.isEmpty {
+            let actionClickPayload: [String: Any] = [
+                "key": notifyKey,
+                "actionIndex": 0
+            ]
+            await publishMessage(
+                topicName: "Oplus_HeySynergy_PcConnect_SyncNotification_Subscriber",
+                key: "HeySynergy_Notification_Action_Clicked",
+                value: actionClickPayload
+            )
+        }
     }
 
     /// Sends one-click call hangup (`actionType = 1`) to the phone via `Oplus_MacConnect` (`incallui_reply`).

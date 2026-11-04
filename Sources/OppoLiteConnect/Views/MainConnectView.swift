@@ -161,58 +161,7 @@ public struct MainConnectView: View {
                 .frame(width: 1)
                 .ignoresSafeArea(.container, edges: .vertical)
 
-            VStack(spacing: 0) {
-                // Fixed non-scrolling top spacer so ScrollView NEVER touches the titlebar boundary
-                Rectangle()
-                    .fill(Color.white)
-                    .frame(height: 2)
-
-                if let activeCall = coordinator.activeIncomingCall {
-                    incomingCallTopBanner(activeCall)
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        switch coordinator.selectedTab {
-                        case .connect:
-                            devicePageView
-                        case .transfer:
-                            transferPageView
-                        case .sms:
-                            messagesPageView
-                        case .settings:
-                            settingsPageView
-                        }
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 10)
-                    .padding(.bottom, 28)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-            .background(Color.white)
-            .background(WindowTitlebarCleaner())
-            .onDrop(of: [.fileURL], isTargeted: $coordinator.isDropTargeted) { providers in
-                handleDroppedProviders(providers)
-            }
-            .overlay {
-                if coordinator.isDropTargeted {
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.blue, style: StrokeStyle(lineWidth: 2, dash: [8]))
-                        .background(Color.blue.opacity(0.06))
-                        .overlay {
-                            VStack(spacing: 10) {
-                                Image(systemName: "arrow.up.circle.fill")
-                                    .font(.system(size: 38))
-                                    .foregroundStyle(.blue)
-                                Text("松开鼠标即可上传文件到当前目录 (\(formattedBreadcrumbPath(coordinator.currentRemotePath)))")
-                                    .font(.system(size: 15, weight: .semibold))
-                            }
-                        }
-                        .padding(20)
-                }
-            }
+            mainContentPanel
         }
         .tint(.blue)
         .environment(\.colorScheme, .light)
@@ -227,6 +176,88 @@ public struct MainConnectView: View {
         } message: {
             Text(coordinator.deleteConfirmationMessage)
         }
+        .alert("确认清空消息记录？", isPresented: $coordinator.showClearMessagesConfirmation) {
+            Button("取消", role: .cancel) {
+                coordinator.cancelClearAllMessages()
+            }
+            Button("清空", role: .destructive) {
+                coordinator.confirmClearAllMessages()
+            }
+        } message: {
+            Text("确定要清空所有短信和来电通知记录吗？此操作不可撤销。")
+        }
+        .alert("确认清空剪切板记录？", isPresented: $coordinator.showClearClipboardConfirmation) {
+            Button("取消", role: .cancel) {
+                coordinator.cancelClearClipboardHistory()
+            }
+            Button("清空", role: .destructive) {
+                coordinator.confirmClearClipboardHistory()
+            }
+        } message: {
+            Text("确定要清空所有跨设备剪切板历史记录吗？此操作不可撤销。")
+        }
+    }
+
+    private var mainContentPanel: some View {
+        VStack(spacing: 0) {
+            // Fixed non-scrolling top spacer so ScrollView NEVER touches the titlebar boundary
+            Rectangle()
+                .fill(Color.white)
+                .frame(height: 2)
+
+            if let activeCall = coordinator.activeIncomingCall {
+                incomingCallTopBanner(activeCall)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    switch coordinator.selectedTab {
+                    case .connect:
+                        devicePageView
+                    case .transfer:
+                        transferPageView
+                    case .sms:
+                        messagesPageView
+                    case .clipboard:
+                        clipboardPageView
+                    case .settings:
+                        settingsPageView
+                    }
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 10)
+                .padding(.bottom, 28)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .background(Color.white)
+        .background(WindowTitlebarCleaner())
+        .onDrop(of: [.fileURL], isTargeted: $coordinator.isDropTargeted) { providers in
+            handleDroppedProviders(providers)
+        }
+        .overlay {
+            if coordinator.isDropTargeted {
+                dropTargetOverlayView
+            }
+        }
+    }
+
+    private var dropTargetOverlayView: some View {
+        let currentDirTitle = formattedBreadcrumbPath(coordinator.currentRemotePath)
+        return RoundedRectangle(cornerRadius: 16)
+            .stroke(Color.blue, style: StrokeStyle(lineWidth: 2, dash: [8]))
+            .background(Color.blue.opacity(0.06))
+            .overlay {
+                VStack(spacing: 10) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 38))
+                        .foregroundStyle(.blue)
+                    Text("松开鼠标即可上传文件到当前目录 (" + currentDirTitle + ")")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+            }
+            .padding(20)
     }
 
     // MARK: - 1. Left Sidebar
@@ -251,11 +282,12 @@ public struct MainConnectView: View {
             .padding(.top, 14)
             .padding(.bottom, 14)
 
-            // Primary 3 Navigation Items (`设备`, `传输`, `消息`)
+            // Primary 4 Navigation Items (`设备`, `传输`, `消息`, `剪切板`)
             VStack(spacing: 4) {
                 sidebarNavRow(tab: .connect, badgeCount: 0)
                 sidebarNavRow(tab: .transfer, badgeCount: 0)
                 sidebarNavRow(tab: .sms, badgeCount: coordinator.unreadMessageCount)
+                sidebarNavRow(tab: .clipboard, badgeCount: 0)
             }
             .padding(.horizontal, 10)
 
@@ -321,8 +353,8 @@ public struct MainConnectView: View {
             ZStack {
                 Circle()
                     .fill(Color.green.opacity(0.16))
-                    .frame(width: 34, height: 34)
-                Image(systemName: "phone.down.waves.left.and.right")
+                    .frame(width: 36, height: 36)
+                Image(systemName: call.isAnsweredOnMac ? (coordinator.callAudioService.isUsingHeadphones ? "headphones" : "mic.fill") : "phone.down.waves.left.and.right")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.green)
             }
@@ -340,24 +372,78 @@ public struct MainConnectView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
+                    if call.isAnsweredOnMac {
+                        Text(coordinator.callAudioService.formattedCallDuration)
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Color.green.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
                 }
                 Text(call.stateDescription)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(call.isAnsweredOnMac ? Color(red: 0.11, green: 0.54, blue: 0.34) : .secondary)
             }
 
             Spacer()
 
-            Button {
-                coordinator.hangupCurrentCall()
-            } label: {
-                Text("挂断")
-                    .font(.system(size: 12, weight: .semibold))
+            if call.isAnsweredOnMac {
+                Button {
+                    coordinator.toggleCallMicrophoneMute()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: coordinator.callAudioService.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(coordinator.callAudioService.isMicrophoneMuted ? "已静音" : "静音")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(coordinator.callAudioService.isMicrophoneMuted ? .orange : .primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(coordinator.callAudioService.isMicrophoneMuted ? Color.orange.opacity(0.14) : Color.primary.opacity(0.06))
+                    )
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    coordinator.answerCurrentCallOnMac()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: coordinator.callAudioService.isUsingHeadphones ? "headphones" : "phone.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("接听")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 5)
-                    .background(Color.red)
+                    .background(Color(red: 0.16, green: 0.74, blue: 0.42))
                     .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(coordinator.callAudioService.isUsingHeadphones
+                      ? "使用耳机麦克风 (\(coordinator.callAudioService.activeInputDeviceName)) 接听"
+                      : "使用 Mac 麦克风 (\(coordinator.callAudioService.activeInputDeviceName)) 接听")
+            }
+
+            Button {
+                coordinator.hangupCurrentCall()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "phone.down.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("挂断")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
+                .background(Color.red)
+                .clipShape(Capsule())
             }
             .buttonStyle(.plain)
         }
@@ -1102,7 +1188,7 @@ public struct MainConnectView: View {
 
                 if !coordinator.smsMessages.isEmpty {
                     Button {
-                        coordinator.clearAllMessages()
+                        coordinator.requestClearAllMessages()
                     } label: {
                         Text("清空")
                             .font(.system(size: 12, weight: .medium))
@@ -1175,86 +1261,94 @@ public struct MainConnectView: View {
         let isJustCopied = coordinator.copiedMessageId == item.id
 
         if let code = item.verificationCode, !code.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    HStack(spacing: 6) {
-                        Text(item.senderTitle)
-                            .font(.system(size: 14, weight: .semibold))
-                        if isExpiredCode {
-                            Text("10 分钟前")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .background(Color.primary.opacity(0.06))
-                                .clipShape(Capsule())
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "message")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.blue)
+                    .frame(width: 20)
+                    .padding(.top, 2)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        HStack(spacing: 6) {
+                            Text(item.senderTitle)
+                                .font(.system(size: 14, weight: .semibold))
+                            if isExpiredCode {
+                                Text("10 分钟前")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Color.primary.opacity(0.06))
+                                    .clipShape(Capsule())
+                            }
                         }
+
+                        Spacer()
+
+                        Text(item.formattedTime)
+                            .font(.system(size: 12).monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
 
-                    Spacer()
+                    HStack(alignment: .center, spacing: 12) {
+                        Button {
+                            coordinator.toggleMessageContentMode(item.id)
+                        } label: {
+                            if isShowingFullSMS {
+                                Text(item.content)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.primary)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                Text(code)
+                                    .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help(isShowingFullSMS ? "点击切换回大号验证码" : "点击查看完整短信内容")
 
-                    Text(item.formattedTime)
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+                        Spacer(minLength: 8)
 
-                HStack(alignment: .center, spacing: 12) {
+                        Button {
+                            coordinator.copyVerificationCode(code, messageId: item.id)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: isJustCopied ? "checkmark" : "doc.on.doc")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(isJustCopied ? "已复制 ✓" : "复制")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundStyle(isJustCopied ? Color(red: 0.11, green: 0.54, blue: 0.34) : .primary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule()
+                                    .fill(isJustCopied ? Color(red: 0.85, green: 0.96, blue: 0.90) : Color.clear)
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(
+                                                isJustCopied ? Color(red: 0.11, green: 0.54, blue: 0.34).opacity(0.3) : Color.primary.opacity(0.16),
+                                                lineWidth: 1
+                                            )
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     Button {
                         coordinator.toggleMessageContentMode(item.id)
                     } label: {
-                        if isShowingFullSMS {
-                            Text(item.content)
-                                .font(.system(size: 13))
-                                .foregroundStyle(.primary)
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            Text(code)
-                                .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
-                                .foregroundStyle(.blue)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help(isShowingFullSMS ? "点击切换回大号验证码" : "点击查看完整短信内容")
-
-                    Spacer(minLength: 8)
-
-                    Button {
-                        coordinator.copyVerificationCode(code, messageId: item.id)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: isJustCopied ? "checkmark" : "doc.on.doc")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(isJustCopied ? "已复制 ✓" : "复制")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .foregroundStyle(isJustCopied ? Color(red: 0.11, green: 0.54, blue: 0.34) : .primary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(isJustCopied ? Color(red: 0.85, green: 0.96, blue: 0.90) : Color.clear)
-                                .overlay(
-                                    Capsule()
-                                        .stroke(
-                                            isJustCopied ? Color(red: 0.11, green: 0.54, blue: 0.34).opacity(0.3) : Color.primary.opacity(0.16),
-                                            lineWidth: 1
-                                        )
-                                )
-                        )
+                        Text(isShowingFullSMS ? "点击返回验证码视图" : "验证码已自动复制 · 点击查看完整短信")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
                 }
-
-                Button {
-                    coordinator.toggleMessageContentMode(item.id)
-                } label: {
-                    Text(isShowingFullSMS ? "点击返回验证码视图" : "验证码已自动复制 · 点击查看完整短信")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
@@ -1284,23 +1378,31 @@ public struct MainConnectView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(item.senderTitle)
-                        .font(.system(size: 14, weight: .semibold))
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "message")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.blue)
+                    .frame(width: 20)
+                    .padding(.top, 2)
 
-                    Spacer()
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(item.senderTitle)
+                            .font(.system(size: 14, weight: .semibold))
 
-                    Text(item.formattedTime)
-                        .font(.system(size: 12).monospacedDigit())
+                        Spacer()
+
+                        Text(item.formattedTime)
+                            .font(.system(size: 12).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(item.content)
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
-
-                Text(item.content)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
@@ -1361,6 +1463,186 @@ public struct MainConnectView: View {
         .padding(.horizontal, 24)
     }
 
+    // MARK: - 4.5. Clipboard Page (`剪切板`)
+
+    private var clipboardPageView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("剪切板")
+                    .font(.system(size: 15, weight: .semibold))
+
+                Text("Mac 与手机双向跨设备复制粘贴")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if !coordinator.clipboardItems.isEmpty {
+                    Button {
+                        coordinator.requestClearClipboardHistory()
+                    } label: {
+                        Text("清空")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 54)
+
+            Divider().opacity(0.45)
+
+            if coordinator.clipboardItems.isEmpty {
+                clipboardEmptyStateIllustration
+            } else {
+                ForEach(Array(coordinator.clipboardItems.enumerated()), id: \.element.id) { idx, item in
+                    if idx > 0 {
+                        Divider().opacity(0.45)
+                    }
+                    clipboardRowView(item)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private func clipboardRowView(_ item: ClipboardHistoryItem) -> some View {
+        let isJustCopied = coordinator.copiedClipboardItemId == item.id
+
+        return HStack(alignment: .top, spacing: 12) {
+            Image(systemName: item.source == .phone ? "iphone" : "laptopcomputer")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(item.source == .phone ? .blue : .indigo)
+                .frame(width: 20)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(item.sourceLabel)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(item.source == .phone ? .blue : .primary)
+
+                    Text(item.formattedTime)
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+                }
+
+                Text(item.content)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
+            Spacer(minLength: 10)
+
+            HStack(spacing: 8) {
+                Button {
+                    coordinator.copyClipboardHistoryItem(item)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: isJustCopied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(isJustCopied ? "已复制 ✓" : "复制")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(isJustCopied ? Color(red: 0.11, green: 0.54, blue: 0.34) : .primary)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isJustCopied ? Color(red: 0.85, green: 0.96, blue: 0.90) : Color.white)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(
+                                        isJustCopied ? Color(red: 0.11, green: 0.54, blue: 0.34).opacity(0.3) : Color.primary.opacity(0.15),
+                                        lineWidth: 1
+                                    )
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    coordinator.deleteClipboardHistoryItem(item)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.red.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("删除此条剪切板记录")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    private var clipboardEmptyStateIllustration: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.blue.opacity(0.14), Color.indigo.opacity(0.06)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 84, height: 84)
+
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white)
+                    .frame(width: 48, height: 38)
+                    .shadow(color: Color.black.opacity(0.06), radius: 6, y: 3)
+                    .overlay {
+                        Image(systemName: "doc.on.clipboard.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [Color.blue, Color.indigo],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    }
+            }
+
+            VStack(spacing: 6) {
+                Text("暂无跨设备剪切板记录")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("在 Mac 或已连接的手机上复制文本后，会自动同步到另一台设备并记录在此处。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 56)
+        .padding(.horizontal, 24)
+    }
+
     // MARK: - 5. Settings Page (`设置`)
 
     private var settingsPageView: some View {
@@ -1369,7 +1651,7 @@ public struct MainConnectView: View {
                 Text("设置")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Text("ColorDrop v1.0.3")
+                Text("ColorDrop v1.1.0")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }

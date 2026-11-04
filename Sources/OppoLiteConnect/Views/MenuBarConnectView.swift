@@ -100,28 +100,58 @@ public struct MenuBarConnectView: View {
             }
             .padding(14)
 
-            // 3. Incoming Call Section (if ringing) OR Latest Verification Code Section
+            // 3. Incoming Call Section (if ringing or in call on Mac) OR Latest Verification Code Section
             if let call = coordinator.activeIncomingCall {
                 Divider().opacity(0.45)
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("手机来电")
+                        Text(call.isAnsweredOnMac ? "正在通话中" : "手机来电")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text(call.location)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                        Text(call.isAnsweredOnMac ? CallAudioRelayService.shared.formattedCallDuration : call.location)
+                            .font(.system(size: 12).monospacedDigit())
+                            .foregroundStyle(call.isAnsweredOnMac ? Color(red: 0.11, green: 0.54, blue: 0.34) : .secondary)
                     }
 
-                    HStack {
+                    HStack(spacing: 8) {
                         Text(call.displayTitle)
                             .font(.system(size: 18, weight: .bold))
                             .foregroundStyle(.blue)
                             .lineLimit(1)
 
                         Spacer()
+
+                        if call.isAnsweredOnMac {
+                            Button {
+                                coordinator.toggleCallMicrophoneMute()
+                            } label: {
+                                Text(CallAudioRelayService.shared.isMicrophoneMuted ? "取消静音" : "静音")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Button {
+                                coordinator.answerCurrentCallOnMac()
+                            } label: {
+                                Text("接听")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .background(Color(red: 0.16, green: 0.68, blue: 0.38))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
 
                         Button {
                             coordinator.hangupCurrentCall()
@@ -137,9 +167,14 @@ public struct MenuBarConnectView: View {
                         .buttonStyle(.plain)
                     }
 
-                    Text("正在响铃...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                    Text(
+                        call.isAnsweredOnMac
+                            ? "麦克风：\(CallAudioRelayService.shared.activeInputDeviceName)"
+                            : "点击接听将使用 \(CallAudioRelayService.shared.activeInputDeviceName) 通话"
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 }
                 .padding(16)
             } else if let verifSMS = coordinator.latestVerificationSMS,

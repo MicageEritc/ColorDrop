@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
-VERSION="${VERSION:-1.0.3}"
+VERSION="${VERSION:-1.1.0}"
 
 if [ -z "${APP_BUNDLE:-}" ]; then
     if [ "${CI:-false}" != "true" ] && [ -d "/Users/micage/Documents/Gemini" ] && [ -w "/Users/micage/Documents/Gemini" ]; then
@@ -25,6 +25,7 @@ xcrun swiftc -O -parse-as-library -target arm64-apple-macosx13.0 \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/DspIPCClient.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/LanSdpDiscovery.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/OShareEngine.swift" \
+  "$PROJECT_DIR/Sources/OppoLiteConnect/Services/CallAudioRelayService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/SMSNotificationService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/ConnectCoordinator.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/MainConnectView.swift" \
@@ -70,6 +71,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ColorDrop 需要访问本地局域网以自动发现并连接同一 Wi-Fi 下的手机设备。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ColorDrop 在 Mac 上接听手机来电时需要使用您的麦克风（或已连接耳机的麦克风）进行通话音频流转。</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_oppo-ln-auth._tcp</string>
@@ -79,7 +82,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
 EOF
 
 echo "==> [3/5] 适配生成 AppIcon.icns..."
+cp -f "$PROJECT_DIR/Vendor/iconbase_192.png" "$APP_BUNDLE/Contents/Resources/Vendor/iconbase_192.png"
 (cd "$PROJECT_DIR" && "$APP_BUNDLE/Contents/MacOS/OppoLiteConnect" --sync-icon-only) || true
+test -f "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 echo "==> [4/5] 解压并嵌入核心互联服务与互传动态库..."
 if [ ! -f "$PROJECT_DIR/Vendor/O+Connect Service" ] || [ ! -f "$PROJECT_DIR/Vendor/libOshareLib.dylib" ] || [ ! -d "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" ]; then

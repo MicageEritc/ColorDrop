@@ -5,10 +5,14 @@ import UserNotifications
 /// SMS & Phone Call Notification Synchronization Service
 ///
 /// Listens to `Oplus_HeySynergy_PcConnect_SyncNotification_Publisher` and `Oplus_MacConnect`
-/// and delivers native macOS notifications with a single app icon (via bundle `AppIcon.icns`,
-/// without duplicate `UNNotificationAttachment` icons).
-public final class SMSNotificationService: @unchecked Sendable {
+/// and delivers native macOS notifications with a single app icon (via bundle `AppIcon.icns`),
+/// including interactive **"接听" (Answer on Mac)** and **"挂断" (Hang Up)** action buttons on incoming call banners.
+public final class SMSNotificationService: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     public static let shared = SMSNotificationService()
+
+    public static let incomingCallCategoryIdentifier = "COLORDROP_INCOMING_CALL"
+    public static let answerCallActionIdentifier = "ACTION_ANSWER_CALL"
+    public static let hangupCallActionIdentifier = "ACTION_HANGUP_CALL"
 
     public static let allowedSMSPackages: Set<String> = [
         "com.android.mms",
@@ -43,15 +47,75 @@ public final class SMSNotificationService: @unchecked Sendable {
 
     public var autoCopyVerificationCode: Bool = true
     public private(set) var blockedNonSMSCount: Int = 0
+    public private(set) var latestCallNotificationKey: String?
+
     public var onSMSReceived: ((SMSNotificationItem) -> Void)?
     public var onActiveCallChanged: ((IncomingCallItem?) -> Void)?
     public var onBlockedCountChanged: ((Int) -> Void)?
+    public var onAnswerCallRequested: ((String, String) -> Void)?
+    public var onHangupCallRequested: ((String, String) -> Void)?
 
     private let lock = NSLock()
     private var recentSMSItems: [SMSNotificationItem] = []
     private var lastDeliveredCallStates: [String: Int] = [:]
 
-    public init() {}
+    public override init() {
+        super.init()
+        configureInteractiveNotificationCategories()
+    }
+
+    /// Registers the `"COLORDROP_INCOMING_CALL"` category with **"接听"** and **"挂断"** buttons on macOS notifications.
+    public func configureInteractiveNotificationCategories() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+
+        let answerAction = UNNotificationAction(
+            identifier: Self.answerCallActionIdentifier,
+            title: "接听",
+            options: [.foreground]
+        )
+        let hangupAction = UNNotificationAction(
+            identifier: Self.hangupCallActionIdentifier,
+            title: "挂断",
+            options: [.destructive]
+        )
+        let callCategory = UNNotificationCategory(
+            identifier: Self.incomingCallCategoryIdentifier,
+            actions: [answerAction, hangupAction],
+            intentIdentifiers: [],
+            options: [.customDismissAction]
+        )
+        center.setNotificationCategories([callCategory])
+    }
+
+    public func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    public func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let userInfo = response.notification.request.content.userInfo
+        let callId = (userInfo["callId"] as? String) ?? "DialerCall"
+        let number = (userInfo["number"] as? String) ?? ""
+
+        switch response.actionIdentifier {
+        case Self.answerCallActionIdentifier:
+            onAnswerCallRequested?(callId, number)
+        case Self.hangupCallActionIdentifier:
+            onHangupCallRequested?(callId, number)
+        default:
+            break
+        }
+        completionHandler()
+    }
 
     // MARK: - Strict SMS & Phone Call Filter
 
@@ -161,6 +225,7 @@ public final class SMSNotificationService: @unchecked Sendable {
             }
         } else if callState == 3 {
             onActiveCallChanged?(callItem)
+            removeDeliveredCallBanner(callId: callId)
             let record = SMSNotificationItem(
                 id: "call-\(callId)",
                 senderNumber: number.isEmpty ? callerLabel : number,
@@ -176,6 +241,7 @@ public final class SMSNotificationService: @unchecked Sendable {
             upsertCallRecordInHistory(record)
         } else if callState == 10 {
             onActiveCallChanged?(nil)
+            removeDeliveredCallBanner(callId: callId)
             let record = SMSNotificationItem(
                 id: "call-\(callId)",
                 senderNumber: number.isEmpty ? callerLabel : number,
@@ -229,6 +295,10 @@ public final class SMSNotificationService: @unchecked Sendable {
             || pkgName.lowercased().contains("incallui")
             || pkgName.lowercased().contains("dialer")
             || Self.allowedCallLabels.contains(headerLabel)
+
+        if isCallNotification, let rawKey = payload["key"] as? String, !rawKey.isEmpty {
+            latestCallNotificationKey = rawKey
+        }
 
         let rawSenderTitle = (contractedChild?["contractedTitle"] as? String)
             ?? (payload["message_title"] as? String)
@@ -364,11 +434,12 @@ public final class SMSNotificationService: @unchecked Sendable {
         }
     }
 
-    // MARK: - Deliver Native macOS Notifications (Single App Icon Only — No Duplicate Attachment Icon)
+    // MARK: - Deliver Native macOS Notifications (Single App Icon + Interactive Answer/Hangup Actions)
 
     /// Incoming Call Notification Template:
     /// 标题：{号码或联系人}
     /// 正文：来电 · {归属地}
+    /// 操作按钮：接听（调用 Mac / 耳机麦克风流转通话） | 挂断
     private func deliverCallMacOSBanner(for call: IncomingCallItem) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let center = UNUserNotificationCenter.current()
@@ -380,10 +451,21 @@ public final class SMSNotificationService: @unchecked Sendable {
             let loc = call.location.trimmingCharacters(in: .whitespacesAndNewlines)
             content.body = loc.isEmpty ? "来电" : "来电 · \(loc)"
             content.sound = .default
+            content.categoryIdentifier = Self.incomingCallCategoryIdentifier
+            content.userInfo = [
+                "callId": call.id,
+                "number": call.number
+            ]
 
-            let req = UNNotificationRequest(identifier: "call-\(call.id)-\(call.callState)", content: content, trigger: nil)
+            let req = UNNotificationRequest(identifier: "call-\(call.id)", content: content, trigger: nil)
             center.add(req)
         }
+    }
+
+    private func removeDeliveredCallBanner(callId: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: ["call-\(callId)", "call-\(callId)-4"])
     }
 
     /// SMS Notification Template:
@@ -400,6 +482,11 @@ public final class SMSNotificationService: @unchecked Sendable {
             if item.category == .call {
                 let loc = item.callLocation.trimmingCharacters(in: .whitespacesAndNewlines)
                 content.body = loc.isEmpty ? (item.content.hasPrefix("来电") ? item.content : "来电") : "来电 · \(loc)"
+                content.categoryIdentifier = Self.incomingCallCategoryIdentifier
+                content.userInfo = [
+                    "callId": item.id,
+                    "number": item.senderNumber
+                ]
             } else {
                 content.body = item.content
             }

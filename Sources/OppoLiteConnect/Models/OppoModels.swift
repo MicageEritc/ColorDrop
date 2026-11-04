@@ -68,9 +68,9 @@ public struct OppoDevice: Identifiable, Hashable, Codable {
     public var formattedSystemSubtitle: String {
         if let res = screenResolution, !res.isEmpty {
             let cleanRes = res.replacingOccurrences(of: "*", with: " × ")
-            return "分辨率 \(cleanRes) · ColorDrop v1.0.3"
+            return "分辨率 \(cleanRes) · ColorDrop v1.1.0"
         }
-        return "跨屏互联协议已就绪 · ColorDrop v1.0.3"
+        return "跨屏互联协议已就绪 · ColorDrop v1.1.0"
     }
 
     public var formattedStorageCardTitle: String {
@@ -122,7 +122,7 @@ public struct OppoDevice: Identifiable, Hashable, Codable {
         ssid: String = "",
         batteryLevel: Int? = nil,
         isCharging: Bool = false,
-        systemVersion: String = "ColorOS 17 · ColorDrop v1.0.3",
+        systemVersion: String = "ColorOS 17 · ColorDrop v1.1.0",
         phoneModel: String? = nil,
         osVersionName: String? = nil,
         screenResolution: String? = nil,
@@ -519,6 +519,9 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
     public var callState: Int // 4 = Ringing, 3 = In Call, 10 = Ended
     public var avatarBase64: String?
     public var receivedAt: Date
+    public var isAnsweredOnMac: Bool
+    public var connectedAt: Date?
+    public var activeAudioDeviceName: String
 
     public var displayTitle: String {
         let trimmed = callerDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -528,8 +531,12 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
     }
 
     public var stateDescription: String {
+        if isAnsweredOnMac && callState == 3 {
+            let dev = activeAudioDeviceName.isEmpty ? "Mac 麦克风" : activeAudioDeviceName
+            return "正在使用 \(dev) 通话中"
+        }
         switch callState {
-        case 4: return "正在来电响铃..."
+        case 4: return "正在来电响铃 · 可在 Mac 直接接听或挂断"
         case 3: return "正在通话中"
         case 10: return "通话已结束"
         default: return "手机通话通知"
@@ -543,7 +550,10 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
         location: String = "",
         callState: Int = 4,
         avatarBase64: String? = nil,
-        receivedAt: Date = Date()
+        receivedAt: Date = Date(),
+        isAnsweredOnMac: Bool = false,
+        connectedAt: Date? = nil,
+        activeAudioDeviceName: String = ""
     ) {
         self.id = id
         self.number = number
@@ -552,6 +562,60 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
         self.callState = callState
         self.avatarBase64 = avatarBase64
         self.receivedAt = receivedAt
+        self.isAnsweredOnMac = isAnsweredOnMac
+        self.connectedAt = connectedAt
+        self.activeAudioDeviceName = activeAudioDeviceName
+    }
+}
+
+// MARK: - Cross-Device Clipboard History Model
+
+public enum ClipboardItemSource: String, Codable, Hashable {
+    case mac = "本机 Mac"
+    case phone = "手机"
+}
+
+public struct ClipboardHistoryItem: Identifiable, Hashable, Codable {
+    public let id: String
+    public var content: String
+    public var source: ClipboardItemSource
+    public var deviceName: String
+    public var createdAt: Date
+
+    public var formattedTime: String {
+        let cal = Calendar.current
+        let fmt = DateFormatter()
+        if cal.isDateInToday(createdAt) {
+            fmt.dateFormat = "今天 HH:mm"
+        } else if cal.isDateInYesterday(createdAt) {
+            fmt.dateFormat = "昨天 HH:mm"
+        } else {
+            fmt.dateFormat = "MM-dd HH:mm"
+        }
+        return fmt.string(from: createdAt)
+    }
+
+    public var sourceLabel: String {
+        switch source {
+        case .phone:
+            return deviceName.isEmpty ? "来自手机" : "来自手机 · \(deviceName)"
+        case .mac:
+            return deviceName.isEmpty ? "来自本机 Mac" : "来自本机 · \(deviceName)"
+        }
+    }
+
+    public init(
+        id: String = UUID().uuidString,
+        content: String,
+        source: ClipboardItemSource,
+        deviceName: String,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.content = content
+        self.source = source
+        self.deviceName = deviceName
+        self.createdAt = createdAt
     }
 }
 

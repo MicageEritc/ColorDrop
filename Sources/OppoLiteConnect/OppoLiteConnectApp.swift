@@ -19,7 +19,7 @@ public struct OppoLiteConnectApp {
     }
 
     private static func runSelfTest() {
-        print("=== ColorDrop v1.0.3 原生自检 ===")
+        print("=== ColorDrop v1.1.0 原生自检 ===")
         let discovery = LanSdpDiscovery()
         print("1. 本地设备 ID: \(discovery.localDeviceId) | 局域网 IP: \(discovery.localIPv4) | 本机IP过滤校验: \(discovery.isSelfAddress(discovery.localIPv4))")
         assert(discovery.isSelfAddress(discovery.localIPv4), "Must filter out Mac's own IP address")
@@ -65,7 +65,18 @@ public struct OppoLiteConnectApp {
             "isIncallui": true
         ])
         assert(callAccepted?.callState == 4 && callAccepted?.displayTitle == "17681396427", "Incoming call must be parsed")
-        print("3. 精简通知模板校验通过 (单图标): 短信标题=\(smsAccepted?.senderTitle ?? "") 正文=\(smsAccepted?.content ?? "") | 来电标题=\(callAccepted?.displayTitle ?? "") 正文=来电 · \(callAccepted?.location ?? "")")
+
+        let clipPayload = DspIPCClient.buildClipboardDataPayload(text: "ColorDrop跨设备剪贴板测试")
+        let phoneClipJson: [String: Any] = [
+            "crossdeviceClipboardVersion": "1200",
+            "timestamp": 1793759281000,
+            "source": "phone",
+            "data": ["text": ["content": "来自手机的复制内容", "encoding": "UTF-8"]]
+        ]
+        assert(DspIPCClient.extractClipboardText(from: clipPayload) == nil, "Must ignore self-originated macOS clipboard echo")
+        assert(DspIPCClient.extractClipboardText(from: phoneClipJson) == "来自手机的复制内容", "Must extract phone clipboard text")
+        let audioInfo = CallAudioRelayService.queryAudioDeviceInfo(isInput: true)
+        print("3. 精简通知模板、跨设备剪贴板协议与通话麦克风检测校验通过: 短信标题=\(smsAccepted?.senderTitle ?? "") | 来电操作分类=\(SMSNotificationService.incomingCallCategoryIdentifier) (接听/挂断) | 当前音频输入=\(audioInfo.name) (外接耳机=\(audioInfo.isHeadphoneOrExternal))")
 
         let sampleDev = OppoDevice(
             deviceId: "2B04DFC2AC20",
@@ -103,7 +114,7 @@ public struct OppoLiteConnectApp {
 
         let memMB = MemoryTelemetry.currentFootprintMB()
         print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
-        print("=== 全部自检通过 (v1.0.3) ===")
+        print("=== 全部自检通过 (v1.1.0) ===")
     }
 }
 
