@@ -114,17 +114,16 @@ public final class OShareEngine: @unchecked Sendable {
                     return customURL
                 }
             }
-            let preferredBase = URL(fileURLWithPath: "/Users/micage/Documents/Gemini", isDirectory: true)
-            let baseDir: URL
-            if FileManager.default.isWritableFile(atPath: preferredBase.path) {
-                baseDir = preferredBase
-            } else {
-                baseDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-                    ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+            let downloadsBase = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+            let downloadsColorDrop = downloadsBase.appendingPathComponent("ColorDrop", isDirectory: true)
+            try? FileManager.default.createDirectory(at: downloadsColorDrop, withIntermediateDirectories: true)
+            if FileManager.default.isWritableFile(atPath: downloadsColorDrop.path) {
+                return downloadsColorDrop
             }
-            let dir = baseDir.appendingPathComponent("OPPO轻联接收", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            return dir
+            let fallbackDir = URL(fileURLWithPath: "/tmp/oppolite-oppodat/Downloads", isDirectory: true)
+            try? FileManager.default.createDirectory(at: fallbackDir, withIntermediateDirectories: true)
+            return fallbackDir
         }()
         self.receiveDirectory = defaultDir
         self.localServerPort = Self.findAvailableTCPPort(startingAt: 48765)
@@ -188,78 +187,66 @@ public final class OShareEngine: @unchecked Sendable {
         return basePort
     }
 
-    // MARK: - SSL Bundle Extraction for `libOshareLib.dylib` (`OshareLibBundle.bundle`)
+    // MARK: - SSL Bundle Resolution for `libOshareLib.dylib` (`OshareLibBundle.bundle`)
 
     public func ensureSSLBundlePath() -> String {
-        let vendorBundleDir = "/Users/micage/Documents/Gemini/OppoLiteConnect/Vendor/OshareLibBundle.bundle"
-        let appResourceBundleDir = Bundle.main.bundlePath + "/Contents/Resources/OshareLibBundle.bundle"
+        let execDir = URL(fileURLWithPath: CommandLine.arguments.first ?? Bundle.main.executablePath ?? "")
+            .deletingLastPathComponent()
+        let inferredBundleSSL = execDir
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/OshareLibBundle.bundle")
+            .path
 
-        let certFileName = "server-cert." + "p" + "e" + "m"
-        let keyFileName = "server-key." + "p" + "e" + "m"
+        let certFileName = "server-cert.pem"
+        let keyFileName = "server-key.pem"
 
-        let vendorCertPath = vendorBundleDir + "/" + certFileName
-        let vendorKeyPath = vendorBundleDir + "/" + keyFileName
+        let candidateDirs = [
+            Bundle.main.bundlePath + "/Contents/Resources/OshareLibBundle.bundle",
+            inferredBundleSSL,
+            FileManager.default.currentDirectoryPath + "/Vendor/OshareLibBundle.bundle",
+            "/Applications/ColorDrop.app/Contents/Resources/OshareLibBundle.bundle",
+            "/Applications/O+ Connect.app/Contents/Resources/OshareLibBundle.bundle"
+        ]
 
-        if !FileManager.default.fileExists(atPath: vendorCertPath) || !FileManager.default.fileExists(atPath: vendorKeyPath) {
-            try? FileManager.default.createDirectory(atPath: vendorBundleDir, withIntermediateDirectories: true)
-            let dmgPath = "/Users/micage/Documents/Gemini/OppoConnect_17.20.0_arm64_domestic_260916200816_794ab31695.dmg"
-            if let handle = FileHandle(forReadingAtPath: dmgPath) {
-                defer { try? handle.close() }
-                if let block1 = Self.readAndInflateZlibBlock(handle: handle, offset: 233_377_792, length: 4096),
-                   let str1 = String(data: block1, encoding: .utf8) {
-                    if str1.contains("PRIVATE KEY") {
-                        try? block1.write(to: URL(fileURLWithPath: vendorKeyPath))
-                    } else {
-                        try? block1.write(to: URL(fileURLWithPath: vendorCertPath))
-                    }
+        let runtimeBundleDir = "/tmp/oppolite-oppodat/OshareLibBundle.bundle"
+        try? FileManager.default.createDirectory(atPath: runtimeBundleDir, withIntermediateDirectories: true)
+
+        for dir in candidateDirs {
+            let certPath = dir + "/" + certFileName
+            let keyPath = dir + "/" + keyFileName
+            if FileManager.default.fileExists(atPath: certPath) && FileManager.default.fileExists(atPath: keyPath) {
+                let runtimeCert = runtimeBundleDir + "/" + certFileName
+                let runtimeKey = runtimeBundleDir + "/" + keyFileName
+                if !FileManager.default.fileExists(atPath: runtimeCert) {
+                    try? FileManager.default.copyItem(atPath: certPath, toPath: runtimeCert)
                 }
-                if let block2 = Self.readAndInflateZlibBlock(handle: handle, offset: 233_381_888, length: 4096),
-                   let str2 = String(data: block2, encoding: .utf8) {
-                    if str2.contains("PRIVATE KEY") {
-                        try? block2.write(to: URL(fileURLWithPath: vendorKeyPath))
-                    } else {
-                        try? block2.write(to: URL(fileURLWithPath: vendorCertPath))
-                    }
+                if !FileManager.default.fileExists(atPath: runtimeKey) {
+                    try? FileManager.default.copyItem(atPath: keyPath, toPath: runtimeKey)
                 }
+                return dir
             }
         }
 
-        if Bundle.main.bundlePath.hasSuffix(".app") {
-            try? FileManager.default.createDirectory(atPath: appResourceBundleDir, withIntermediateDirectories: true)
-            let appCertPath = appResourceBundleDir + "/" + certFileName
-            let appKeyPath = appResourceBundleDir + "/" + keyFileName
-            if FileManager.default.fileExists(atPath: vendorCertPath) && !FileManager.default.fileExists(atPath: appCertPath) {
-                try? FileManager.default.copyItem(atPath: vendorCertPath, toPath: appCertPath)
-            }
-            if FileManager.default.fileExists(atPath: vendorKeyPath) && !FileManager.default.fileExists(atPath: appKeyPath) {
-                try? FileManager.default.copyItem(atPath: vendorKeyPath, toPath: appKeyPath)
-            }
-            if FileManager.default.fileExists(atPath: appCertPath) {
-                return appResourceBundleDir
-            }
-        }
-
-        return vendorBundleDir
-    }
-
-    private static func readAndInflateZlibBlock(handle: FileHandle, offset: UInt64, length: Int) -> Data? {
-        do {
-            try handle.seek(toOffset: offset)
-            guard let raw = try handle.read(upToCount: length), !raw.isEmpty else { return nil }
-            let decompressed = DspIPCClient.decompressGzipOrZlibIfNeeded(raw)
-            return decompressed.count > raw.count ? decompressed : nil
-        } catch {
-            return nil
-        }
+        return runtimeBundleDir
     }
 
     // MARK: - Dynamic C FFI Bridge to `libOshareLib.dylib`
 
     public func loadOShareDylibIfAvailable() {
         let sslBundlePath = ensureSSLBundlePath()
+        let execDir = URL(fileURLWithPath: CommandLine.arguments.first ?? Bundle.main.executablePath ?? "")
+            .deletingLastPathComponent()
+        let inferredBundleDylib = execDir
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/Vendor/libOshareLib.dylib")
+            .path
+
         let candidatePaths = [
             Bundle.main.bundlePath + "/Contents/Resources/Vendor/libOshareLib.dylib",
-            "/Users/micage/Documents/Gemini/OppoLiteConnect/Vendor/libOshareLib.dylib"
+            inferredBundleDylib,
+            FileManager.default.currentDirectoryPath + "/Vendor/libOshareLib.dylib",
+            "/Applications/ColorDrop.app/Contents/Resources/Vendor/libOshareLib.dylib",
+            "/Applications/O+ Connect.app/Contents/Frameworks/libOshareLib.dylib"
         ]
         for path in candidatePaths where FileManager.default.fileExists(atPath: path) {
             if let handle = dlopen(path, RTLD_NOW | RTLD_LOCAL) {
@@ -307,8 +294,8 @@ public final class OShareEngine: @unchecked Sendable {
 
     public func configureFFI(deviceName: String, senderId: String, sslBundlePath: String) {
         guard isFFILoaded else { return }
-        let sendTmpDir = "/Users/micage/Documents/Gemini/oppodat/send_tmp"
-        let recvTmpDir = "/Users/micage/Documents/Gemini/oppodat/recv_tmp"
+        let sendTmpDir = "/tmp/oppolite-oppodat/send_tmp"
+        let recvTmpDir = "/tmp/oppolite-oppodat/recv_tmp"
         try? FileManager.default.createDirectory(atPath: sendTmpDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(atPath: recvTmpDir, withIntermediateDirectories: true)
 

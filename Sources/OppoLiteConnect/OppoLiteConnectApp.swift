@@ -97,7 +97,9 @@ public struct OppoLiteConnectApp {
             "dataModified": "2026-09-18 10:25:00"
         ])
         assert(parsedItem?.formattedDate == "2026-09-18 10:25", "Modification date string must be parsed accurately")
-        print("5. 状态栏快传目录 (\(ConnectCoordinator.menuBarDefaultRemoteDirectory))、主界面目录直传与真实文件修改时间解析 (\(parsedItem?.formattedDate ?? "")) 校验通过: FFI加载=\(oshare.isFFILoaded) | 服务端口=\(String(oshare.localServerPort)) | SSL资源包=\(sslBundlePath)")
+        assert(oshare.isFFILoaded, "libOshareLib.dylib must be bundled and loaded")
+        assert(DspIPCClient.shared.locateSourceDaemonBinaryPath() != nil, "O+Connect Service daemon binary must be bundled")
+        print("5. 状态栏快传目录 (\(ConnectCoordinator.menuBarDefaultRemoteDirectory))、主界面目录直传与真实文件修改时间解析 (\(parsedItem?.formattedDate ?? "")) 校验通过: FFI加载=\(oshare.isFFILoaded) | 守护进程就绪=\(DspIPCClient.shared.locateSourceDaemonBinaryPath() != nil) | 服务端口=\(String(oshare.localServerPort)) | SSL资源包=\(sslBundlePath)")
 
         let memMB = MemoryTelemetry.currentFootprintMB()
         print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
@@ -162,20 +164,11 @@ public struct ColorDropGUIApp: App {
         Self.applyCustomIconIfAvailable()
     }
 
-    /// Loads `/Users/micage/Downloads/iconbase-icons (1)/android-chrome-192x192.png` first,
+    /// Loads `Vendor/iconbase_192.png` (or bundled `AppIcon.png`),
     /// normalizes it to Apple's macOS HIG squircle grid (`824/1024`), sets the Dock icon,
-    /// and updates `Vendor/iconbase_192.png` + `AppIcon.icns`.
+    /// and updates `AppIcon.icns`.
     public static func applyCustomIconIfAvailable() {
         let cwd = FileManager.default.currentDirectoryPath
-        let primaryIconPath = "/Users/micage/Downloads/iconbase-icons (1)/android-chrome-192x192.png"
-        let vendorCopyPath = "/Users/micage/Documents/Gemini/OppoLiteConnect/Vendor/iconbase_192.png"
-        let cwdVendorPath = "\(cwd)/Vendor/iconbase_192.png"
-
-        if FileManager.default.fileExists(atPath: primaryIconPath),
-           let rawData = try? Data(contentsOf: URL(fileURLWithPath: primaryIconPath)) {
-            try? rawData.write(to: URL(fileURLWithPath: vendorCopyPath), options: .atomic)
-        }
-
         let execURL = URL(fileURLWithPath: CommandLine.arguments.first ?? Bundle.main.executablePath ?? "")
         let inferredBundleResDir = execURL
             .deletingLastPathComponent()
@@ -184,12 +177,7 @@ public struct ColorDropGUIApp: App {
             .path
 
         let candidatePaths: [String] = [
-            primaryIconPath,
-            vendorCopyPath,
-            cwdVendorPath,
-            "/Users/micage/Downloads/iconbase-icons/desktop-1024x1024.png",
-            "/Users/micage/Documents/Gemini/OppoLiteConnect/Vendor/iconbase_raw_1024.png",
-            "\(cwd)/Vendor/iconbase_raw_1024.png",
+            "\(cwd)/Vendor/iconbase_192.png",
             "\(inferredBundleResDir)/AppIcon.png",
             Bundle.main.bundlePath + "/Contents/Resources/AppIcon.png"
         ]
@@ -202,22 +190,11 @@ public struct ColorDropGUIApp: App {
                     NSApplication.shared.applicationIconImage = nsImage
                 }
 
-                if FileManager.default.fileExists(atPath: "/Users/micage/Documents/Gemini") {
-                    let cacheIconPath = "/Users/micage/Documents/Gemini/oppodat/app_notification_icon.png"
-                    try? FileManager.default.createDirectory(
-                        atPath: "/Users/micage/Documents/Gemini/oppodat",
-                        withIntermediateDirectories: true
-                    )
-                    try? normalizedPng.write(to: URL(fileURLWithPath: cacheIconPath), options: .atomic)
-                }
-
-                // Update `AppIcon.png` & multi-resolution `AppIcon.icns` in both inferred bundle & local ColorDrop.app
                 let targetResDirs = Set([
                     inferredBundleResDir,
-                    Bundle.main.bundlePath + "/Contents/Resources",
-                    "/Users/micage/Documents/Gemini/ColorDrop.app/Contents/Resources"
+                    Bundle.main.bundlePath + "/Contents/Resources"
                 ])
-                for resDir in targetResDirs where FileManager.default.fileExists(atPath: resDir) {
+                for resDir in targetResDirs where FileManager.default.isWritableFile(atPath: resDir) {
                     try? normalizedPng.write(to: URL(fileURLWithPath: "\(resDir)/AppIcon.png"), options: .atomic)
                     Self.writeMultiSizeIcns(fromSourcePath: path, toPath: "\(resDir)/AppIcon.icns")
                 }

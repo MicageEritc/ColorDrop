@@ -14,23 +14,11 @@ if [ -z "${APP_BUNDLE:-}" ]; then
     fi
 fi
 
-LEGACY_BUNDLE="/Users/micage/Documents/Gemini/OPPO轻联.app"
-
 killall OppoLiteConnect 2>/dev/null || true
-rm -rf "$LEGACY_BUNDLE" 2>/dev/null || true
-
-if [ -r "/Users/micage/Downloads/iconbase-icons (1)/android-chrome-192x192.png" ]; then
-    mkdir -p "$PROJECT_DIR/Vendor"
-    cp -f "/Users/micage/Downloads/iconbase-icons (1)/android-chrome-192x192.png" "$PROJECT_DIR/Vendor/iconbase_192.png"
-fi
 
 echo "==> [1/5] 编译 Swift 原生 Release 二进制 (arm64, v${VERSION})..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources/Vendor"
-
-if [ -d "/Users/micage/Documents/Gemini" ] && [ -w "/Users/micage/Documents/Gemini" ]; then
-    mkdir -p "/Users/micage/Documents/Gemini/oppodat"
-fi
 
 xcrun swiftc -O -parse-as-library -target arm64-apple-macosx13.0 \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Models/OppoModels.swift" \
@@ -93,22 +81,30 @@ EOF
 echo "==> [3/5] 适配生成 AppIcon.icns..."
 (cd "$PROJECT_DIR" && "$APP_BUNDLE/Contents/MacOS/OppoLiteConnect" --sync-icon-only) || true
 
-echo "==> [4/5] 嵌入互传库与后台服务（若存在）..."
-if [ -f "$PROJECT_DIR/Vendor/libOshareLib.dylib" ]; then
-    cp -f "$PROJECT_DIR/Vendor/libOshareLib.dylib" "$APP_BUNDLE/Contents/Resources/Vendor/libOshareLib.dylib"
-fi
-if [ -f "$PROJECT_DIR/Vendor/O+Connect Service" ]; then
-    cp -f "$PROJECT_DIR/Vendor/O+Connect Service" "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
-    chmod +x "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
-fi
-if [ -d "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" ]; then
-    rm -rf "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle"
-    cp -R "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle"
+echo "==> [4/5] 解压并嵌入核心互联服务与互传动态库..."
+if [ ! -f "$PROJECT_DIR/Vendor/O+Connect Service" ] || [ ! -f "$PROJECT_DIR/Vendor/libOshareLib.dylib" ] || [ ! -d "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" ]; then
+    if [ -f "$PROJECT_DIR/Vendor/runtime.tar.xz" ]; then
+        echo "    正在从 Vendor/runtime.tar.xz 解压运行时组件..."
+        tar -xJf "$PROJECT_DIR/Vendor/runtime.tar.xz" -C "$PROJECT_DIR/Vendor"
+    fi
 fi
 
-echo "==> [5/5] 签名并清理旧版残留..."
+cp -f "$PROJECT_DIR/Vendor/libOshareLib.dylib" "$APP_BUNDLE/Contents/Resources/Vendor/libOshareLib.dylib"
+cp -f "$PROJECT_DIR/Vendor/O+Connect Service" "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
+chmod +x "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
+rm -rf "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle"
+cp -R "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle"
+
+# 严格校验所有内置运行时组件，杜绝空 Vendor 目录打包
+test -x "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
+test -f "$APP_BUNDLE/Contents/Resources/Vendor/libOshareLib.dylib"
+test -f "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle/server-cert.pem"
+
+echo "==> [5/5] 签名并校验应用包..."
 rm -f "$APP_BUNDLE/Icon"* 2>/dev/null || true
 xattr -cr "$APP_BUNDLE" 2>/dev/null || true
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/Vendor/libOshareLib.dylib"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
 codesign --force --deep --sign - "$APP_BUNDLE"
 touch "$APP_BUNDLE"
 

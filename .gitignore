@@ -7,12 +7,14 @@ DerivedData/
 *.xcuserdata
 ColorDrop/
 
-# Third-party proprietary runtime binaries & certificates (do not commit to public GitHub repo)
+# Unpacked large binaries (tracked via compressed Vendor/runtime.tar.xz for GitHub CI DMG builds)
 Vendor/O+Connect Service
 Vendor/libOshareLib.dylib
 Vendor/OshareLibBundle.bundle/
+Vendor/iconbase_raw_1024.png
 !Vendor/iconbase_192.png
-!Vendor/iconbase_raw_1024.png
+!Vendor/runtime.tar.xz
+
 *.dmg
 *.dmg.sha256
 dsplogs/

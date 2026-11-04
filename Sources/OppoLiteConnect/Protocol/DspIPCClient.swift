@@ -10,7 +10,10 @@ public final class DspIPCClient: @unchecked Sendable {
 
     public let dspSocketPath = "/tmp/oppolite-dspc"
     public let eventSocketPath = "/tmp/oppolite-evnt"
-    public let sandboxDirPath = "/Users/micage/Documents/Gemini/oppodat"
+    public let sandboxDirPath = "/tmp/oppolite-oppodat"
+    public var runtimeDaemonBinaryPath: String {
+        sandboxDirPath + "/O+Connect Service"
+    }
 
     private var isListeningEvents = false
     private var isLaunchingDaemon = false
@@ -41,23 +44,66 @@ public final class DspIPCClient: @unchecked Sendable {
         return prefix + rawAddress.dropFirst(4)
     }
 
-    // MARK: - Prepare User-Writable Sandbox & Code-Signed Daemon Binary
+    /// Locates the bundled or system `O+Connect Service` binary across all deployment environments.
+    public func locateSourceDaemonBinaryPath() -> String? {
+        let execDir = URL(fileURLWithPath: CommandLine.arguments.first ?? Bundle.main.executablePath ?? "")
+            .deletingLastPathComponent()
+        let inferredBundleVendor = execDir
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/Vendor/O+Connect Service")
+            .path
+
+        let candidates = [
+            Bundle.main.bundlePath + "/Contents/Resources/Vendor/O+Connect Service",
+            inferredBundleVendor,
+            FileManager.default.currentDirectoryPath + "/Vendor/O+Connect Service",
+            "/Applications/ColorDrop.app/Contents/Resources/Vendor/O+Connect Service",
+            "/Applications/O+ Connect.app/Contents/Resources/daemon/O+Connect Service",
+            "/Library/Application Support/O+Connect/O+Connect Service"
+        ]
+        return candidates.first(where: { FileManager.default.fileExists(atPath: $0) })
+    }
+
+    // MARK: - Prepare Universal `/tmp/oppolite-oppodat` Sandbox & Code-Signed Daemon Binary
 
     public func prepareDaemonBinaryIfNeeded() {
         prepareUserSandboxDirectory()
 
-        let paths = [
-            "/Users/micage/Documents/Gemini/OppoLiteConnect/Vendor/O+Connect Service",
-            Bundle.main.bundlePath + "/Contents/Resources/Vendor/O+Connect Service"
-        ]
+        let fm = FileManager.default
+        if let srcPath = locateSourceDaemonBinaryPath() {
+            let dstPath = runtimeDaemonBinaryPath
+            let srcSize = (try? fm.attributesOfItem(atPath: srcPath)[.size] as? Int64) ?? 0
+            let dstSize = (try? fm.attributesOfItem(atPath: dstPath)[.size] as? Int64) ?? -1
+            if !fm.fileExists(atPath: dstPath) || srcSize != dstSize {
+                try? fm.removeItem(atPath: dstPath)
+                try? fm.copyItem(atPath: srcPath, toPath: dstPath)
+                chmod(dstPath, 0o755)
+            }
+        }
+
+        var targetPaths: [String] = []
+        if fm.fileExists(atPath: runtimeDaemonBinaryPath) {
+            targetPaths.append(runtimeDaemonBinaryPath)
+        }
+        if let srcPath = locateSourceDaemonBinaryPath(),
+           srcPath != runtimeDaemonBinaryPath,
+           fm.isWritableFile(atPath: srcPath) {
+            targetPaths.append(srcPath)
+        }
 
         let replacements: [(Data, Data)] = [
+            (Data("/tmp/oplus-dsp-ipc".utf8), Data("/tmp/oppolite-dspc".utf8)),
             (Data("/tmp/oppolite-dsp1".utf8), Data("/tmp/oppolite-dspc".utf8)),
+            (Data("/tmp/dsp-ipc-event".utf8), Data("/tmp/oppolite-evnt".utf8)),
             (Data("/tmp/oppolite-evt1".utf8), Data("/tmp/oppolite-evnt".utf8)),
-            (Data("/Library/Application Support/O+Connect".utf8), Data("/Users/micage/Documents/Gemini/oppodat".utf8)),
-            (Data("Library/Application Support/O+Connect".utf8), Data("Documents/Gemini/oppodat/././././././".utf8)),
-            (Data("/Library/Logs/devicespace-daemon".utf8), Data("/Documents/Gemini/dsplogs-daemon".utf8)),
-            (Data("/Library/Logs/devicespace".utf8), Data("/Documents/Gemini/dsplogs".utf8)),
+            (Data("/Library/Application Support/O+Connect".utf8), Data("/tmp/oppolite-oppodat/././././././././".utf8)),
+            (Data("/Users/micage/Documents/Gemini/oppodat".utf8), Data("/tmp/oppolite-oppodat/././././././././".utf8)),
+            (Data("Library/Application Support/O+Connect".utf8), Data("/tmp/oppolite-oppodat/./././././././.".utf8)),
+            (Data("Documents/Gemini/oppodat/././././././".utf8), Data("/tmp/oppolite-oppodat/./././././././.".utf8)),
+            (Data("/Library/Logs/devicespace-daemon".utf8), Data("/tmp/oppolite-dsplogs-daemon/./.".utf8)),
+            (Data("/Documents/Gemini/dsplogs-daemon".utf8), Data("/tmp/oppolite-dsplogs-daemon/./.".utf8)),
+            (Data("/Library/Logs/devicespace".utf8), Data("/tmp/oppolite-dsplogs/./.".utf8)),
+            (Data("/Documents/Gemini/dsplogs".utf8), Data("/tmp/oppolite-dsplogs/./.".utf8)),
             (Data("oplus_remote_ui".utf8), Data("OppoLiteConnect".utf8))
         ]
 
@@ -90,7 +136,7 @@ public final class DspIPCClient: @unchecked Sendable {
             (0xd3c348, [0xff, 0x03, 0x02, 0xd1], [0xc0, 0x03, 0x5f, 0xd6])
         ]
 
-        for path in paths where FileManager.default.isWritableFile(atPath: path) {
+        for path in targetPaths where fm.isWritableFile(atPath: path) {
             guard var data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { continue }
             var modified = false
 
@@ -132,8 +178,9 @@ public final class DspIPCClient: @unchecked Sendable {
             sandboxDirPath + "/data",
             sandboxDirPath + "/send_tmp",
             sandboxDirPath + "/recv_tmp",
-            "/Users/micage/Documents/Gemini/dsplogs-daemon",
-            "/Users/micage/Documents/Gemini/dsplogs"
+            "/tmp/oppolite-dsplogs-daemon",
+            "/tmp/oppolite-dsplogs",
+            "/tmp/devicespace"
         ]
         for dir in dirs {
             try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -146,8 +193,12 @@ public final class DspIPCClient: @unchecked Sendable {
         chmod(userFlagPath, 0o666)
 
         let targetDb = sandboxDirPath + "/ndsf.db"
-        let sourceDb = "/Library/Application Support/O+Connect/ndsf.db"
-        if !fm.fileExists(atPath: targetDb), fm.fileExists(atPath: sourceDb) {
+        let sourceDbCandidates = [
+            "/Library/Application Support/O+Connect/ndsf.db",
+            home + "/Documents/Gemini/oppodat/ndsf.db"
+        ]
+        if !fm.fileExists(atPath: targetDb),
+           let sourceDb = sourceDbCandidates.first(where: { fm.fileExists(atPath: $0) }) {
             try? fm.copyItem(atPath: sourceDb, toPath: targetDb)
         }
 
@@ -159,13 +210,27 @@ public final class DspIPCClient: @unchecked Sendable {
             needsWrite = false
         }
         if needsWrite {
-            let validDeviceJson = "{\"device_type_major\":11,\"serial_number\":\"C02OPPO12345\",\"device_id\":[16,42,188,129,85,1],\"client_version\":\"17.20.0\"}"
+            let hexId = LanSdpDiscovery.computeLocalDeviceId()
+            var byteArray: [Int] = []
+            var idx = hexId.startIndex
+            while idx < hexId.endIndex {
+                let nextIdx = hexId.index(idx, offsetBy: 2, limitedBy: hexId.endIndex) ?? hexId.endIndex
+                if let b = Int(hexId[idx..<nextIdx], radix: 16) {
+                    byteArray.append(b)
+                }
+                idx = nextIdx
+            }
+            if byteArray.count != 6 {
+                byteArray = [16, 42, 188, 129, 85, 1]
+            }
+            let bytesStr = byteArray.map(String.init).joined(separator: ",")
+            let validDeviceJson = "{\"device_type_major\":11,\"serial_number\":\"C02\(hexId.prefix(9))\",\"device_id\":[\(bytesStr)],\"client_version\":\"17.20.0\"}"
             try? validDeviceJson.write(toFile: localInfoPath, atomically: true, encoding: .utf8)
         }
         chmod(localInfoPath, 0o666)
 
         if let items = try? fm.contentsOfDirectory(atPath: sandboxDirPath) {
-            for item in items {
+            for item in items where item != "O+Connect Service" {
                 let fullPath = sandboxDirPath + "/" + item
                 var isDir: ObjCBool = false
                 if fm.fileExists(atPath: fullPath, isDirectory: &isDir) {
@@ -191,6 +256,14 @@ public final class DspIPCClient: @unchecked Sendable {
     }
 
     private func adHocCodesignBinary(at path: String) {
+        let xattrProc = Process()
+        xattrProc.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        xattrProc.arguments = ["-cr", path]
+        xattrProc.standardOutput = FileHandle.nullDevice
+        xattrProc.standardError = FileHandle.nullDevice
+        try? xattrProc.run()
+        xattrProc.waitUntilExit()
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         proc.arguments = ["--force", "--sign", "-", path]
@@ -270,10 +343,10 @@ public final class DspIPCClient: @unchecked Sendable {
         needsDaemonRestart = false
         lock.unlock()
 
-        let candidatePaths = [
-            Bundle.main.bundlePath + "/Contents/Resources/Vendor/O+Connect Service",
-            "/Users/micage/Documents/Gemini/OppoLiteConnect/Vendor/O+Connect Service"
-        ]
+        var candidatePaths: [String] = [runtimeDaemonBinaryPath]
+        if let src = locateSourceDaemonBinaryPath() {
+            candidatePaths.append(src)
+        }
         guard let execPath = candidatePaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             lock.lock()
             isLaunchingDaemon = false

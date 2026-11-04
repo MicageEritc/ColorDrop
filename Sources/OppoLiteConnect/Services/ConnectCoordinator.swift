@@ -195,7 +195,7 @@ public final class ConnectCoordinator: ObservableObject {
     private let pairedIdsByIPDefaultsKey = "OppoLite.PairedDeviceIdsByIP"
     private let lastConnectedIdDefaultsKey = "ColorDrop.LastConnectedDeviceId"
     private let manualDisconnectDefaultsKey = "ColorDrop.UserManuallyDisconnected"
-    private let messageHistoryFilePath = "/Users/micage/Documents/Gemini/oppodat/message_history.json"
+    private let messageHistoryFilePath = "/tmp/oppolite-oppodat/message_history.json"
 
     private var pairedDeviceIds: Set<String> = []
     private var knownDeviceIdByIP: [String: String] = [:]
@@ -305,8 +305,14 @@ public final class ConnectCoordinator: ObservableObject {
     }
 
     private func seedRecentDeviceAndBatteryStateFromDaemonLog() {
-        let logDir = "/Users/micage/Documents/Gemini/dsplogs-daemon"
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: logDir) else { return }
+        let candidateLogDirs = [
+            "/tmp/devicespace",
+            "/tmp/oppolite-dsplogs-daemon"
+        ]
+        guard let logDir = candidateLogDirs.first(where: {
+            ((try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? []).contains(where: { $0.hasSuffix(".log") })
+        }),
+        let files = try? FileManager.default.contentsOfDirectory(atPath: logDir) else { return }
         let logFiles = files.filter { $0.hasSuffix(".log") && !$0.contains("crash") }.sorted()
         guard let latestLog = logFiles.last else { return }
         let fullPath = "\(logDir)/\(latestLog)"
