@@ -995,6 +995,7 @@ public final class DspIPCClient: @unchecked Sendable {
 
         // Announce PC capabilities & activate bidirectional cross-device clipboard sync (`crossdeviceClipboardVersion: 1200`)
         await sendClipboardSyncState(appId: appId, enabled: true, isFirstTime: true)
+        await syncCastUnlockMode(appId: appId, mode: "auto")
     }
 
     public func sendClipboardSyncState(appId: Int? = nil, enabled: Bool = true, isFirstTime: Bool = false) async {
@@ -1125,67 +1126,10 @@ public final class DspIPCClient: @unchecked Sendable {
         _ = try? await request(path: uri)
     }
 
-    /// Sends multi-channel call answer & audio handoff commands to the phone:
-    /// 1. `HeySynergy_Notification_Action_Clicked` on `Oplus_HeySynergy_PcConnect_SyncNotification_Subscriber`
-    ///    with the real ColorOS `com.android.incallui` notification key (`0|com.android.incallui|268451840|null|1001`)
-    ///    and Answer action ID (`actionId: 1` in Android `InCallUI` `StatusBarNotifier`, where `0` is Decline and `1` is Answer).
-    /// 2. `incallui_reply` (`actionType: 0` & `actionType: 3`) + `pc_vdc_audio_event` (`pc_audio_output`)
-    ///    + `notify_ocast_ear_phone_connect` (`state: 1`) on `Oplus_MacConnect` and `Oplus_Cast`.
-    public func answerIncomingCall(callId: String, phoneNumber: String, notificationKey: String? = nil) async {
-        var candidateKeys: [String] = [
-            "0|com.android.incallui|268451840|null|1001",
-            "0|com.android.incallui|1|null|1001"
-        ]
-        if let customKey = notificationKey, !customKey.isEmpty, !candidateKeys.contains(customKey) {
-            candidateKeys.insert(customKey, at: 0)
-        }
-
-        for nKey in candidateKeys {
-            let icdfActionDict: [String: Any] = [
-                "actionId": 1,
-                "actionIndex": 1,
-                "iconByteStr": "",
-                "label": "接听",
-                "notificationKey": nKey,
-                "key": nKey
-            ]
-            await publishMessage(
-                topicName: "Oplus_HeySynergy_PcConnect_SyncNotification_Subscriber",
-                key: "HeySynergy_Notification_Action_Clicked",
-                value: icdfActionDict
-            )
-            if let data = try? JSONSerialization.data(withJSONObject: icdfActionDict),
-               let jsonStr = String(data: data, encoding: .utf8) {
-                await publishMessage(
-                    topicName: "Oplus_HeySynergy_PcConnect_SyncNotification_Subscriber",
-                    key: "HeySynergy_Notification_Action_Clicked",
-                    value: jsonStr
-                )
-            }
-        }
-
-        for actionCode in [0, 3] {
-            let answerValue: [String: Any] = [
-                "id": callId,
-                "number": phoneNumber,
-                "actionType": actionCode,
-                "audio_device": "pc",
-                "msg": ""
-            ]
-            await publishMessage(topicName: "Oplus_MacConnect", key: "incallui_reply", value: answerValue)
-        }
-
-        // Notify phone to route audio output to Mac / connected headphones
-        await publishMessage(
-            topicName: "Oplus_MacConnect",
-            key: "pc_vdc_audio_event",
-            value: ["audio_output": "pc_audio_output", "state": 1]
-        )
-        await publishMessage(
-            topicName: "Oplus_MacConnect",
-            key: "notify_ocast_ear_phone_connect",
-            value: ["state": 1]
-        )
+    /// Syncs screen cast unlock mode (`Synergy_CastUnlock_Version` & `Synergy_CastUnlock_Mode`) on `Oplus_MacConnect`.
+    public func syncCastUnlockMode(appId: Int? = nil, mode: String = "auto") async {
+        await publishMessage(appId: appId, topicName: "Oplus_MacConnect", key: "Synergy_CastUnlock_Version", value: "2000")
+        await publishMessage(appId: appId, topicName: "Oplus_MacConnect", key: "Synergy_CastUnlock_Mode", value: mode)
     }
 
     /// Sends one-click call hangup (`actionType = 1`) to the phone via `Oplus_MacConnect` (`incallui_reply`).

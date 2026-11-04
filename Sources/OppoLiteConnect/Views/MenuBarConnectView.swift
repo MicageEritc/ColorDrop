@@ -51,19 +51,19 @@ public struct MenuBarConnectView: View {
 
             Divider().opacity(0.45)
 
-            // 2. Two-Column Quick Action Buttons (`发送文件` -> Download/ColorDrop, `接收文件夹`)
-            HStack(spacing: 10) {
+            // 2. Quick Action Buttons (`发送文件`, `接收文件夹`, `手机镜像`)
+            HStack(spacing: 8) {
                 Button {
                     coordinator.pickAndSendFilesFromMenuBar()
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "paperplane")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                         Text("发送文件")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 9)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(Color.white)
@@ -79,14 +79,14 @@ public struct MenuBarConnectView: View {
                 Button {
                     coordinator.openReceiveDirectoryInFinder()
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "folder")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                         Text("接收文件夹")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 9)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(Color.white)
@@ -97,23 +97,47 @@ public struct MenuBarConnectView: View {
                     )
                 }
                 .buttonStyle(.plain)
+
+                if coordinator.connectedDevice != nil {
+                    Button {
+                        coordinator.startScreenMirroring()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "rectangle.on.rectangle")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("镜像")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.white)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("在 Mac 上打开手机镜像并直接操控手机")
+                }
             }
             .padding(14)
 
-            // 3. Incoming Call Section (if ringing or in call on Mac) OR Latest Verification Code Section
+            // 3. Incoming Call Section (Hangup Only) OR Latest Verification Code Section
             if let call = coordinator.activeIncomingCall {
                 Divider().opacity(0.45)
 
-                let isCallConnected = (call.callState == 3)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(isCallConnected ? "正在通话中" : "手机来电")
+                        Text(call.callState == 3 ? "正在通话中" : "手机来电")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text(isCallConnected ? CallAudioRelayService.shared.formattedCallDuration : call.location)
-                            .font(.system(size: 12).monospacedDigit())
-                            .foregroundStyle(isCallConnected ? Color(red: 0.11, green: 0.54, blue: 0.34) : .secondary)
+                        Text(call.location)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     }
 
                     HStack(spacing: 8) {
@@ -123,40 +147,6 @@ public struct MenuBarConnectView: View {
                             .lineLimit(1)
 
                         Spacer()
-
-                        if isCallConnected {
-                            Button {
-                                coordinator.toggleCallMicrophoneMute()
-                            } label: {
-                                Text(CallAudioRelayService.shared.isMicrophoneMuted ? "取消静音" : "静音")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.primary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .stroke(Color.primary.opacity(0.16), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button {
-                                coordinator.answerCurrentCallOnMac()
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: CallAudioRelayService.shared.isUsingHeadphones ? "headphones" : "phone.fill")
-                                        .font(.system(size: 11, weight: .bold))
-                                    Text("接听")
-                                        .font(.system(size: 12, weight: .semibold))
-                                }
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color(red: 0.16, green: 0.78, blue: 0.37))
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
 
                         Button {
                             coordinator.hangupCurrentCall()
@@ -168,7 +158,7 @@ public struct MenuBarConnectView: View {
                                     .font(.system(size: 12, weight: .semibold))
                             }
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 14)
                             .padding(.vertical, 6)
                             .background(Color(red: 0.95, green: 0.23, blue: 0.21))
                             .clipShape(Capsule())
@@ -176,16 +166,10 @@ public struct MenuBarConnectView: View {
                         .buttonStyle(.plain)
                     }
 
-                    Text(
-                        isCallConnected
-                            ? "麦克风：\(CallAudioRelayService.shared.activeInputDeviceName)"
-                            : (call.isAnswerPendingOnMac
-                               ? "已请求接听 · 轻按耳机或手机确认（使用 \(CallAudioRelayService.shared.activeInputDeviceName)）"
-                               : "点击接听将使用 \(CallAudioRelayService.shared.activeInputDeviceName) 通话")
-                    )
-                    .font(.system(size: 12))
-                    .foregroundStyle(call.isAnswerPendingOnMac ? .blue : .secondary)
-                    .lineLimit(1)
+                    Text(call.stateDescription)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 .padding(16)
             } else if let verifSMS = coordinator.latestVerificationSMS,

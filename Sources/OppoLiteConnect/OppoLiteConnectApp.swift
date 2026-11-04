@@ -65,17 +65,7 @@ public struct OppoLiteConnectApp {
             "isIncallui": true,
             "sms_reply_list": "[\"我现在不方便接听，稍后联系。\"]"
         ])
-        assert(callAccepted?.callState == 4 && callAccepted?.isAnsweredOnMac == false && callAccepted?.displayTitle == "17681396427", "Ringing call must not falsely report answered state")
-
-        let callConnected = smsService.processIncomingCallInfo(payload: [
-            "id": "DialerCall_12",
-            "number": "17681396427",
-            "callerDisplayName": "",
-            "location": "安徽铜陵 联通",
-            "callState": 3,
-            "isIncallui": true
-        ])
-        assert(callConnected?.callState == 3 && callConnected?.isAnsweredOnMac == true, "Connected callState==3 must report active call state")
+        assert(callAccepted?.callState == 4 && callAccepted?.displayTitle == "17681396427", "Ringing call must be parsed accurately")
         _ = smsService.processIncomingCallInfo(payload: [
             "id": "DialerCall_12",
             "number": "17681396427",
@@ -92,9 +82,9 @@ public struct OppoLiteConnectApp {
         ]
         assert(DspIPCClient.extractClipboardText(from: clipPayload) == nil, "Must ignore self-originated macOS clipboard echo")
         assert(DspIPCClient.extractClipboardText(from: phoneClipJson) == "来自手机的复制内容", "Must extract phone clipboard text")
-        CallAudioRelayService.bindHeadphoneMicrophoneAsDefaultInputIfNeeded()
-        let audioInfo = CallAudioRelayService.queryAudioDeviceInfo(isInput: true)
-        print("3. 精简通知模板、跨设备剪贴板协议、独立红绿按钮来电横幅与通话麦克风检测校验通过: 短信标题=\(smsAccepted?.senderTitle ?? "") | 来电操作分类=\(SMSNotificationService.incomingCallCategoryIdentifier) (绿键接听/红键挂断) | 当前音频输入=\(audioInfo.name) (外接耳机=\(audioInfo.isHeadphoneOrExternal))")
+        let mirrorBundlePath = ScreenMirrorService.shared.locateCastAppBundlePath()
+        assert(mirrorBundlePath != nil, "手机投屏.app must be bundled and executable")
+        print("3. 原生 macOS 通知栏来电挂断、跨设备剪贴板协议与官方手机镜像组件校验通过: 短信标题=\(smsAccepted?.senderTitle ?? "") | 来电分类=\(SMSNotificationService.incomingCallCategoryIdentifier) (仅挂断) | 手机镜像组件=\(mirrorBundlePath ?? "")")
 
         let sampleDev = OppoDevice(
             deviceId: "2B04DFC2AC20",

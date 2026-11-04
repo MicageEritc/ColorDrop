@@ -342,18 +342,17 @@ public struct MainConnectView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Active Incoming Call Alert Banner
+    // MARK: - Active Incoming Call Alert Banner (Hangup Only)
 
     private func incomingCallTopBanner(_ call: IncomingCallItem) -> some View {
-        let isCallConnected = (call.callState == 3)
-        return HStack(spacing: 12) {
+        HStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(Color.green.opacity(0.16))
+                    .fill(Color.red.opacity(0.14))
                     .frame(width: 36, height: 36)
-                Image(systemName: isCallConnected ? (coordinator.callAudioService.isUsingHeadphones ? "headphones" : "mic.fill") : "phone.down.waves.left.and.right")
+                Image(systemName: "phone.down.waves.left.and.right")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(.red)
             }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -369,63 +368,13 @@ public struct MainConnectView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
-                    if isCallConnected {
-                        Text(coordinator.callAudioService.formattedCallDuration)
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.green)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(Color.green.opacity(0.12))
-                            .clipShape(Capsule())
-                    }
                 }
                 Text(call.stateDescription)
                     .font(.system(size: 11))
-                    .foregroundStyle(isCallConnected ? Color(red: 0.11, green: 0.54, blue: 0.34) : (call.isAnswerPendingOnMac ? .blue : .secondary))
+                    .foregroundStyle(.secondary)
             }
 
             Spacer()
-
-            if isCallConnected {
-                Button {
-                    coordinator.toggleCallMicrophoneMute()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: coordinator.callAudioService.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(coordinator.callAudioService.isMicrophoneMuted ? "已静音" : "静音")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .foregroundStyle(coordinator.callAudioService.isMicrophoneMuted ? .orange : .primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule()
-                            .fill(coordinator.callAudioService.isMicrophoneMuted ? Color.orange.opacity(0.14) : Color.primary.opacity(0.06))
-                    )
-                }
-                .buttonStyle(.plain)
-            } else {
-                Button {
-                    coordinator.answerCurrentCallOnMac()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: coordinator.callAudioService.isUsingHeadphones ? "headphones" : "phone.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("接听")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 5)
-                    .background(Color(red: 0.16, green: 0.78, blue: 0.37))
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help(coordinator.callAudioService.isUsingHeadphones
-                      ? "使用耳机麦克风 (\(coordinator.callAudioService.activeInputDeviceName)) 接听"
-                      : "使用 Mac 麦克风 (\(coordinator.callAudioService.activeInputDeviceName)) 接听")
-            }
 
             Button {
                 coordinator.hangupCurrentCall()
@@ -489,20 +438,46 @@ public struct MainConnectView: View {
 
                         Spacer()
 
-                        Button {
-                            coordinator.disconnect()
-                        } label: {
-                            Text("断开")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.primary)
+                        HStack(spacing: 10) {
+                            Button {
+                                coordinator.startScreenMirroring()
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "rectangle.on.rectangle")
+                                        .font(.system(size: 11, weight: .semibold))
+                                    Text(coordinator.isScreenMirroring ? "手机镜像中" : "手机镜像")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 6)
                                 .background(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                                        .fill(
+                                            coordinator.isScreenMirroring
+                                                ? Color(red: 0.16, green: 0.65, blue: 0.38)
+                                                : Color.blue
+                                        )
                                 )
+                            }
+                            .buttonStyle(.plain)
+                            .help("在 Mac 上打开手机镜像并直接使用鼠标键盘操控手机")
+
+                            Button {
+                                coordinator.disconnect()
+                            } label: {
+                                Text("断开")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                     .padding(20)
                 } else {

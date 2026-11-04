@@ -5,16 +5,13 @@ import UserNotifications
 /// SMS & Phone Call Notification Synchronization Service
 ///
 /// Listens to `Oplus_HeySynergy_PcConnect_SyncNotification_Publisher` and `Oplus_MacConnect`:
-/// - Delivers native macOS SMS notifications with single app icon (`AppIcon.icns`).
-/// - Coordinates real-time incoming call state (`callState`: 4 = ringing, 3 = active/in-call, 10 = ended)
-///   with the top-right floating `IncomingCallBannerController` (direct one-click Green "接听" & Red "挂断" buttons).
+/// - Delivers native macOS SMS notifications via `UNUserNotificationCenter`.
+/// - Delivers native macOS incoming call notifications via `UNUserNotificationCenter` with only a "挂断" (Hangup) action.
 public final class SMSNotificationService: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     public static let shared = SMSNotificationService()
 
     public static let incomingCallCategoryIdentifier = "COLORDROP_INCOMING_CALL"
-    public static let answerCallActionIdentifier = "ACTION_ANSWER_CALL"
     public static let hangupCallActionIdentifier = "ACTION_HANGUP_CALL"
-    public static let defaultColorOSInCallNotificationKey = "0|com.android.incallui|268451840|null|1001"
 
     public static let allowedSMSPackages: Set<String> = [
         "com.android.mms",
@@ -51,7 +48,6 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
 
     private let lock = NSLock()
     private var _blockedNonSMSCount: Int = 0
-    private var _latestCallNotificationKey: String = SMSNotificationService.defaultColorOSInCallNotificationKey
     private var recentSMSItems: [SMSNotificationItem] = []
     private var lastDeliveredCallStates: [String: Int] = [:]
 
@@ -61,16 +57,9 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
         return _blockedNonSMSCount
     }
 
-    public var latestCallNotificationKey: String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return _latestCallNotificationKey
-    }
-
     public var onSMSReceived: ((SMSNotificationItem) -> Void)?
     public var onActiveCallChanged: ((IncomingCallItem?) -> Void)?
     public var onBlockedCountChanged: ((Int) -> Void)?
-    public var onAnswerCallRequested: ((String, String) -> Void)?
     public var onHangupCallRequested: ((String, String) -> Void)?
 
     public override init() {
@@ -78,17 +67,13 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
         configureInteractiveNotificationCategories()
     }
 
-    /// Registers the `"COLORDROP_INCOMING_CALL"` category for notification center fallback.
+    /// Registers the `"COLORDROP_INCOMING_CALL"` category on macOS native `UNUserNotificationCenter`
+    /// with ONLY the `"挂断"` (Hangup) action.
     public func configureInteractiveNotificationCategories() {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
 
-        let answerAction = UNNotificationAction(
-            identifier: Self.answerCallActionIdentifier,
-            title: "接听",
-            options: [.foreground]
-        )
         let hangupAction = UNNotificationAction(
             identifier: Self.hangupCallActionIdentifier,
             title: "挂断",
@@ -96,7 +81,7 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
         )
         let callCategory = UNNotificationCategory(
             identifier: Self.incomingCallCategoryIdentifier,
-            actions: [answerAction, hangupAction],
+            actions: [hangupAction],
             intentIdentifiers: [],
             options: [.customDismissAction]
         )
@@ -123,13 +108,8 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            switch actionId {
-            case Self.answerCallActionIdentifier:
-                self.onAnswerCallRequested?(callId, number)
-            case Self.hangupCallActionIdentifier:
+            if actionId == Self.hangupCallActionIdentifier {
                 self.onHangupCallRequested?(callId, number)
-            default:
-                break
             }
         }
         completionHandler()
@@ -196,12 +176,6 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
         let location = (payload["location"] as? String) ?? ""
         let avatarB64 = payload["photo"] as? String
 
-        if let rawNotifyKey = payload["key"] as? String, rawNotifyKey.contains("|") {
-            lock.lock()
-            _latestCallNotificationKey = rawNotifyKey
-            lock.unlock()
-        }
-
         var smsReplies: [String] = []
         if let replyStr = payload["sms_reply_list"] as? String,
            let replyData = replyStr.data(using: .utf8),
@@ -228,14 +202,11 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             callState: callState,
             avatarBase64: avatarB64,
             receivedAt: Date(),
-            isAnsweredOnMac: callState == 3,
-            isAnswerPendingOnMac: false,
-            connectedAt: callState == 3 ? Date() : nil,
-            activeAudioDeviceName: "",
             smsReplyOptions: smsReplies
         )
 
         lock.lock()
+        let prevState = lastDeliveredCallStates[callId]
         lastDeliveredCallStates[callId] = callState
         lock.unlock()
 
@@ -244,6 +215,9 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
 
         if callState == 4 {
             onActiveCallChanged?(callItem)
+            if prevState != 4 {
+                deliverCallMacOSBanner(for: callItem)
+            }
             let record = SMSNotificationItem(
                 id: "call-\(callId)",
                 senderNumber: number.isEmpty ? callerLabel : number,
@@ -259,7 +233,6 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             upsertCallRecordInHistory(record)
         } else if callState == 3 {
             onActiveCallChanged?(callItem)
-            removeDeliveredCallBanner(callId: callId)
             let record = SMSNotificationItem(
                 id: "call-\(callId)",
                 senderNumber: number.isEmpty ? callerLabel : number,
@@ -309,12 +282,6 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
 
     @discardableResult
     public func processIncomingNotification(topicKey: String, payload: [String: Any]) -> SMSNotificationItem? {
-        if let rawKey = payload["key"] as? String, rawKey.contains("incallui") {
-            lock.lock()
-            _latestCallNotificationKey = rawKey
-            lock.unlock()
-        }
-
         if topicKey == "incallui_info" || (payload["isIncallui"] as? Bool) == true || payload["callState"] != nil {
             _ = processIncomingCallInfo(payload: payload)
             return nil
@@ -338,12 +305,6 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             || pkgName.lowercased().contains("incallui")
             || pkgName.lowercased().contains("dialer")
             || Self.allowedCallLabels.contains(headerLabel)
-
-        if isCallNotification, let rawKey = payload["key"] as? String, !rawKey.isEmpty {
-            lock.lock()
-            _latestCallNotificationKey = rawKey
-            lock.unlock()
-        }
 
         let rawSenderTitle = (contractedChild?["contractedTitle"] as? String)
             ?? (payload["message_title"] as? String)
@@ -449,11 +410,7 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             copyToClipboard(code)
         }
 
-        // Only deliver system UNUserNotification for SMS or missed calls;
-        // Live ringing calls (`incallui_info`) use the top-right floating HUD banner with direct Green/Red buttons!
-        if !isCallNotification {
-            deliverMacOSBanner(for: item)
-        }
+        deliverMacOSBanner(for: item)
         onSMSReceived?(item)
         return item
     }
@@ -483,15 +440,35 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
         }
     }
 
-    private func removeDeliveredCallBanner(callId: String) {
+    public func removeDeliveredCallBanner(callId: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let center = UNUserNotificationCenter.current()
         center.removeDeliveredNotifications(withIdentifiers: ["call-\(callId)", "call-\(callId)-4"])
     }
 
-    /// SMS Notification Template:
-    /// 标题：{发件人}
-    /// 正文：{短信内容}
+    /// Native macOS Incoming Call Notification Banner (via `UNUserNotificationCenter`) with ONLY the `"挂断"` action.
+    private func deliverCallMacOSBanner(for call: IncomingCallItem) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = call.displayTitle
+            content.subtitle = ""
+            content.body = call.location.isEmpty ? "手机来电" : "手机来电 · \(call.location)"
+            content.sound = .default
+            content.categoryIdentifier = Self.incomingCallCategoryIdentifier
+            content.userInfo = [
+                "callId": call.id,
+                "number": call.number
+            ]
+
+            let req = UNNotificationRequest(identifier: "call-\(call.id)-4", content: content, trigger: nil)
+            center.add(req)
+        }
+    }
+
+    /// Native macOS SMS Notification Banner (via `UNUserNotificationCenter`)
     private func deliverMacOSBanner(for item: SMSNotificationItem) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let center = UNUserNotificationCenter.current()
@@ -502,6 +479,13 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             content.subtitle = ""
             content.body = item.content
             content.sound = .default
+            if item.category == .call {
+                content.categoryIdentifier = Self.incomingCallCategoryIdentifier
+                content.userInfo = [
+                    "callId": item.id,
+                    "number": item.senderNumber
+                ]
+            }
 
             let req = UNNotificationRequest(identifier: item.id, content: content, trigger: nil)
             center.add(req)

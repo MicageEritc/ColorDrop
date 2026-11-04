@@ -177,7 +177,9 @@ public final class ConnectCoordinator: ObservableObject {
         transferTasks.filter { $0.state == .transferring || $0.state == .pending }.count
     }
 
-    public let callAudioService = CallAudioRelayService.shared
+    // Screen Mirroring (`手机投屏.app`)
+    @Published public var isScreenMirroring: Bool = false
+    public let screenMirrorService = ScreenMirrorService.shared
 
     private let discovery = LanSdpDiscovery()
     private let dspClient = DspIPCClient.shared
@@ -719,37 +721,10 @@ public final class ConnectCoordinator: ObservableObject {
         smsService.onActiveCallChanged = { [weak self] callItem in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if var incoming = callItem {
-                    self.callAudioService.refreshAudioDeviceRoute()
-                    incoming.activeAudioDeviceName = self.callAudioService.activeInputDeviceName
-                    if incoming.callState == 3 {
-                        incoming.isAnsweredOnMac = true
-                        incoming.isAnswerPendingOnMac = false
-                        if let current = self.activeIncomingCall, current.id == incoming.id, let existingStart = current.connectedAt {
-                            incoming.connectedAt = existingStart
-                        } else {
-                            incoming.connectedAt = Date()
-                        }
-                        self.callAudioService.startActiveCallSession(phoneIP: self.connectedDevice?.lanIP ?? "")
-                        self.statusBanner = "通话已接通 · 正在使用 \(incoming.activeAudioDeviceName)"
-                    } else if incoming.callState == 4 {
-                        if let current = self.activeIncomingCall, current.id == incoming.id {
-                            incoming.isAnswerPendingOnMac = current.isAnswerPendingOnMac
-                        }
-                    }
-                    self.activeIncomingCall = incoming
-                    IncomingCallBannerController.shared.updateBanner(for: incoming, coordinator: self)
-                } else {
-                    self.callAudioService.stopCallRelay()
-                    self.activeIncomingCall = nil
-                    IncomingCallBannerController.shared.updateBanner(for: nil, coordinator: self)
+                self.activeIncomingCall = callItem
+                if let incoming = callItem {
+                    self.statusBanner = "收到来自 \(incoming.displayTitle) 的来电"
                 }
-            }
-        }
-
-        smsService.onAnswerCallRequested = { [weak self] callId, number in
-            Task { @MainActor [weak self] in
-                self?.answerCurrentCallOnMac(explicitCallId: callId, explicitNumber: number)
             }
         }
 
@@ -759,13 +734,20 @@ public final class ConnectCoordinator: ObservableObject {
             }
         }
 
-        callAudioService.onAudioRouteChanged = { [weak self] inputName, _ in
+        screenMirrorService.onMirrorStateChanged = { [weak self] isActive, msg in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.activeIncomingCall != nil {
-                    self.activeIncomingCall?.activeAudioDeviceName = inputName
-                    IncomingCallBannerController.shared.updateBanner(for: self.activeIncomingCall, coordinator: self)
+                self.isScreenMirroring = isActive
+                if !msg.isEmpty {
+                    self.statusBanner = msg
                 }
+            }
+        }
+
+        screenMirrorService.onUnlockModeChanged = { [weak self] mode in
+            guard let self else { return }
+            Task {
+                await self.dspClient.syncCastUnlockMode(mode: mode)
             }
         }
 
@@ -1507,6 +1489,10 @@ public final class ConnectCoordinator: ObservableObject {
             }
             return
         }
+        if key == "phone_start_mirror" {
+            startScreenMirroring(fromPhone: true)
+            return
+        }
         if key == "incallui_info" {
             if let valStr = msgJson["value"] as? String,
                let valData = valStr.data(using: .utf8),
@@ -1915,6 +1901,10 @@ public final class ConnectCoordinator: ObservableObject {
     private func handlePeerDisconnected(byUser: Bool) {
         connectedDevice = nil
         activeIncomingCall = nil
+        if isScreenMirroring || screenMirrorService.isMirroringActive {
+            screenMirrorService.stopAllCastOnDisconnect()
+            isScreenMirroring = false
+        }
         consecutiveICMPFailures = 0
         consecutiveDaemonDisconnectChecks = 0
         connectionState = byUser ? .disconnected : .scanning
@@ -2411,64 +2401,40 @@ public final class ConnectCoordinator: ObservableObject {
         showClearClipboardConfirmation = false
     }
 
-    // MARK: - Incoming Call Answer (Mac Microphone / Headphone Relay) & Hangup
+    // MARK: - Screen Mirroring (`手机投屏.app`) & Incoming Call Hangup
 
-    public func answerCurrentCallOnMac(explicitCallId: String? = nil, explicitNumber: String? = nil) {
-        callAudioService.prepareAndRequestCallAnswer(phoneIP: connectedDevice?.lanIP ?? "")
-        let micName = callAudioService.activeInputDeviceName
-
-        if var call = activeIncomingCall {
-            call.activeAudioDeviceName = micName
-            if call.callState == 3 {
-                call.isAnsweredOnMac = true
-                call.isAnswerPendingOnMac = false
-                if call.connectedAt == nil { call.connectedAt = Date() }
-                callAudioService.startActiveCallSession(phoneIP: connectedDevice?.lanIP ?? "")
-                statusBanner = "正在使用 \(micName) 通话"
-            } else {
-                // Keep callState == 4 until the phone confirms callState == 3 via incallui_info!
-                call.isAnswerPendingOnMac = true
-                statusBanner = "已发送接听请求（已绑定 \(micName)）"
-            }
-            activeIncomingCall = call
-            IncomingCallBannerController.shared.updateBanner(for: call, coordinator: self)
-            let notifyKey = smsService.latestCallNotificationKey
-            Task {
-                await dspClient.answerIncomingCall(
-                    callId: call.id,
-                    phoneNumber: call.number,
-                    notificationKey: notifyKey
-                )
-            }
-        } else if let cid = explicitCallId {
-            let num = explicitNumber ?? ""
-            let notifyKey = smsService.latestCallNotificationKey
-            statusBanner = "已发送接听请求（已绑定 \(micName)）"
-            Task {
-                await dspClient.answerIncomingCall(
-                    callId: cid,
-                    phoneNumber: num,
-                    notificationKey: notifyKey
-                )
-            }
+    public func startScreenMirroring(fromPhone: Bool = false) {
+        guard let device = connectedDevice else {
+            statusBanner = "请先连接手机后再开启手机镜像"
+            return
+        }
+        let winFrame = ColorDropAppDelegate.shared.mainWindow?.frame ?? CGRect(x: 180, y: 140, width: 900, height: 580)
+        let currentLocalIP = localIP
+        statusBanner = "正在启动 \(device.deviceName) 手机镜像..."
+        Task {
+            await dspClient.syncCastUnlockMode(mode: "auto")
+            _ = await screenMirrorService.startScreenMirroring(
+                device: device,
+                localIP: currentLocalIP,
+                mainWindowBounds: winFrame,
+                mirageFrom: fromPhone ? 0 : 1
+            )
         }
     }
 
-    public func toggleCallMicrophoneMute() {
-        callAudioService.toggleMicrophoneMute()
-        let muted = callAudioService.isMicrophoneMuted
-        statusBanner = muted ? "通话麦克风已静音" : "通话麦克风已取消静音 (\(callAudioService.activeInputDeviceName))"
-        IncomingCallBannerController.shared.updateBanner(for: activeIncomingCall, coordinator: self)
+    public func stopScreenMirroring() {
+        Task {
+            await screenMirrorService.stopScreenMirroring()
+        }
     }
 
     public func hangupCurrentCall(explicitCallId: String? = nil, explicitNumber: String? = nil) {
         let callId = explicitCallId ?? activeIncomingCall?.id ?? "DialerCall"
         let number = explicitNumber ?? activeIncomingCall?.number ?? ""
-        let title = activeIncomingCall?.displayTitle ?? (number.isEmpty ? "当前通话" : number)
-        callAudioService.stopCallRelay()
+        let title = activeIncomingCall?.displayTitle ?? (number.isEmpty ? "当前来电" : number)
         activeIncomingCall = nil
-        IncomingCallBannerController.shared.dismissBanner()
-        statusBanner = "已挂断 \(title) 的通话"
+        smsService.removeDeliveredCallBanner(callId: callId)
+        statusBanner = "已挂断 \(title) 的来电"
         Task {
             await dspClient.hangupIncomingCall(callId: callId, phoneNumber: number)
         }

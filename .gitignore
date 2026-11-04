@@ -7,13 +7,15 @@ DerivedData/
 *.xcuserdata
 ColorDrop/
 
-# Unpacked large binaries (tracked via compressed Vendor/runtime.tar.xz for GitHub CI DMG builds)
+# Unpacked large binaries (tracked via compressed Vendor/runtime.tar.xz & Vendor/mirror.tar.xz for GitHub CI DMG builds)
 Vendor/O+Connect Service
 Vendor/libOshareLib.dylib
 Vendor/OshareLibBundle.bundle/
+Vendor/手机投屏.app/
 Vendor/iconbase_raw_1024.png
 !Vendor/iconbase_192.png
 !Vendor/runtime.tar.xz
+!Vendor/mirror.tar.xz
 
 *.dmg
 *.dmg.sha256

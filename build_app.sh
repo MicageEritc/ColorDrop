@@ -25,12 +25,11 @@ xcrun swiftc -O -parse-as-library -target arm64-apple-macosx13.0 \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/DspIPCClient.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/LanSdpDiscovery.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/OShareEngine.swift" \
-  "$PROJECT_DIR/Sources/OppoLiteConnect/Services/CallAudioRelayService.swift" \
+  "$PROJECT_DIR/Sources/OppoLiteConnect/Services/ScreenMirrorService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/SMSNotificationService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/ConnectCoordinator.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/MainConnectView.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/MenuBarConnectView.swift" \
-  "$PROJECT_DIR/Sources/OppoLiteConnect/Views/IncomingCallBannerController.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/StatusBarDropController.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/OppoLiteConnectApp.swift" \
   -lz \
@@ -72,8 +71,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ColorDrop 需要访问本地局域网以自动发现并连接同一 Wi-Fi 下的手机设备。</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>ColorDrop 在 Mac 上接听手机来电时需要使用您的麦克风（或已连接耳机的麦克风）进行通话音频流转。</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_oppo-ln-auth._tcp</string>
@@ -87,11 +84,18 @@ cp -f "$PROJECT_DIR/Vendor/iconbase_192.png" "$APP_BUNDLE/Contents/Resources/Ven
 (cd "$PROJECT_DIR" && "$APP_BUNDLE/Contents/MacOS/OppoLiteConnect" --sync-icon-only) || true
 test -f "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
-echo "==> [4/5] 解压并嵌入核心互联服务与互传动态库..."
+echo "==> [4/5] 解压并嵌入核心互联服务、手机镜像与互传动态库..."
 if [ ! -f "$PROJECT_DIR/Vendor/O+Connect Service" ] || [ ! -f "$PROJECT_DIR/Vendor/libOshareLib.dylib" ] || [ ! -d "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" ]; then
     if [ -f "$PROJECT_DIR/Vendor/runtime.tar.xz" ]; then
         echo "    正在从 Vendor/runtime.tar.xz 解压运行时组件..."
         tar -xJf "$PROJECT_DIR/Vendor/runtime.tar.xz" -C "$PROJECT_DIR/Vendor"
+    fi
+fi
+
+if [ ! -d "$PROJECT_DIR/Vendor/手机投屏.app" ]; then
+    if [ -f "$PROJECT_DIR/Vendor/mirror.tar.xz" ]; then
+        echo "    正在从 Vendor/mirror.tar.xz 解压手机镜像组件..."
+        tar -xJf "$PROJECT_DIR/Vendor/mirror.tar.xz" -C "$PROJECT_DIR/Vendor"
     fi
 fi
 
@@ -100,17 +104,22 @@ cp -f "$PROJECT_DIR/Vendor/O+Connect Service" "$APP_BUNDLE/Contents/Resources/Ve
 chmod +x "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
 rm -rf "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle"
 cp -R "$PROJECT_DIR/Vendor/OshareLibBundle.bundle" "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle"
+rm -rf "$APP_BUNDLE/Contents/Resources/Vendor/手机投屏.app"
+cp -R "$PROJECT_DIR/Vendor/手机投屏.app" "$APP_BUNDLE/Contents/Resources/Vendor/手机投屏.app"
+chmod +x "$APP_BUNDLE/Contents/Resources/Vendor/手机投屏.app/Contents/MacOS/手机投屏"
 
 # 严格校验所有内置运行时组件，杜绝空 Vendor 目录打包
 test -x "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
 test -f "$APP_BUNDLE/Contents/Resources/Vendor/libOshareLib.dylib"
 test -f "$APP_BUNDLE/Contents/Resources/OshareLibBundle.bundle/server-cert.pem"
+test -x "$APP_BUNDLE/Contents/Resources/Vendor/手机投屏.app/Contents/MacOS/手机投屏"
 
 echo "==> [5/5] 签名并校验应用包..."
 rm -f "$APP_BUNDLE/Icon"* 2>/dev/null || true
 xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 codesign --force --sign - "$APP_BUNDLE/Contents/Resources/Vendor/libOshareLib.dylib"
 codesign --force --sign - "$APP_BUNDLE/Contents/Resources/Vendor/O+Connect Service"
+codesign --force --deep --sign - "$APP_BUNDLE/Contents/Resources/Vendor/手机投屏.app"
 codesign --force --deep --sign - "$APP_BUNDLE"
 touch "$APP_BUNDLE"
 

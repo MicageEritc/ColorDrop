@@ -519,10 +519,6 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
     public var callState: Int // 4 = Ringing, 3 = In Call, 10 = Ended
     public var avatarBase64: String?
     public var receivedAt: Date
-    public var isAnsweredOnMac: Bool
-    public var isAnswerPendingOnMac: Bool
-    public var connectedAt: Date?
-    public var activeAudioDeviceName: String
     public var smsReplyOptions: [String]
 
     public var displayTitle: String {
@@ -533,18 +529,11 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
     }
 
     public var stateDescription: String {
-        let dev = activeAudioDeviceName.isEmpty ? "Mac 麦克风" : activeAudioDeviceName
-        if callState == 3 {
-            return "正在使用 \(dev) 通话中"
-        }
-        if callState == 4 && isAnswerPendingOnMac {
-            return "已发送接听请求（若未自动接通请轻按耳机或手机确认，接通后使用 \(dev)）"
-        }
         switch callState {
-        case 4: return "正在来电响铃 · 可直接点击接听或挂断"
-        case 3: return "正在通话中"
+        case 4: return "正在来电响铃 · 可直接点击挂断"
+        case 3: return "正在通话中 · 可直接点击挂断"
         case 10: return "通话已结束"
-        default: return "手机通话通知"
+        default: return "手机来电通知"
         }
     }
 
@@ -556,10 +545,6 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
         callState: Int = 4,
         avatarBase64: String? = nil,
         receivedAt: Date = Date(),
-        isAnsweredOnMac: Bool = false,
-        isAnswerPendingOnMac: Bool = false,
-        connectedAt: Date? = nil,
-        activeAudioDeviceName: String = "",
         smsReplyOptions: [String] = []
     ) {
         self.id = id
@@ -569,10 +554,6 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
         self.callState = callState
         self.avatarBase64 = avatarBase64
         self.receivedAt = receivedAt
-        self.isAnsweredOnMac = isAnsweredOnMac
-        self.isAnswerPendingOnMac = isAnswerPendingOnMac
-        self.connectedAt = connectedAt
-        self.activeAudioDeviceName = activeAudioDeviceName
         self.smsReplyOptions = smsReplyOptions
     }
 }
