@@ -30,6 +30,7 @@ xcrun swiftc -O -parse-as-library -target arm64-apple-macosx13.0 \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/ConnectCoordinator.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/MainConnectView.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/MenuBarConnectView.swift" \
+  "$PROJECT_DIR/Sources/OppoLiteConnect/Views/IncomingCallBannerController.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Views/StatusBarDropController.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/OppoLiteConnectApp.swift" \
   -lz \

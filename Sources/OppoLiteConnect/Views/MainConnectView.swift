@@ -8,48 +8,44 @@ import CoreImage.CIFilterBuiltins
 /// using KVO observation, empty CAShapeLayer masking, and mouse-hover tracking.
 public final class TitlebarObserverView: NSView {
     private var styleObservation: NSKeyValueObservation?
-    private var mouseMonitor: Any?
     private weak var observedWindow: NSWindow?
-
-    deinit {
-        if let monitor = mouseMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
-    }
+    private var pendingCleanScheduled = false
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        scheduleCleanWindow()
         attachToWindow()
     }
 
     public override func layout() {
         super.layout()
-        if let win = window {
-            WindowTitlebarCleaner.cleanWindow(win)
+        // Never mutate window.styleMask or subview visibility synchronously inside AppKit's layout() pass!
+        scheduleCleanWindow()
+    }
+
+    private func scheduleCleanWindow() {
+        guard !pendingCleanScheduled else { return }
+        pendingCleanScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pendingCleanScheduled = false
+            if let win = self.window {
+                WindowTitlebarCleaner.cleanWindow(win)
+            }
         }
     }
 
     private func attachToWindow() {
         guard let win = window else { return }
-        WindowTitlebarCleaner.cleanWindow(win)
         guard observedWindow !== win else { return }
         observedWindow = win
 
-        styleObservation = win.observe(\.titlebarSeparatorStyle, options: [.new, .initial]) { [weak win] _, _ in
+        styleObservation = win.observe(\.titlebarSeparatorStyle, options: [.new, .initial]) { [weak self, weak win] _, _ in
             guard let win else { return }
             if win.titlebarSeparatorStyle != .none {
                 win.titlebarSeparatorStyle = .none
             }
-            WindowTitlebarCleaner.hideTitlebarDecorationViews(in: win)
-        }
-
-        if mouseMonitor == nil {
-            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .mouseEntered, .leftMouseDown]) { [weak self] event in
-                if let w = self?.window {
-                    WindowTitlebarCleaner.cleanWindow(w)
-                }
-                return event
-            }
+            self?.scheduleCleanWindow()
         }
     }
 }
@@ -349,12 +345,13 @@ public struct MainConnectView: View {
     // MARK: - Active Incoming Call Alert Banner
 
     private func incomingCallTopBanner(_ call: IncomingCallItem) -> some View {
-        HStack(spacing: 12) {
+        let isCallConnected = (call.callState == 3)
+        return HStack(spacing: 12) {
             ZStack {
                 Circle()
                     .fill(Color.green.opacity(0.16))
                     .frame(width: 36, height: 36)
-                Image(systemName: call.isAnsweredOnMac ? (coordinator.callAudioService.isUsingHeadphones ? "headphones" : "mic.fill") : "phone.down.waves.left.and.right")
+                Image(systemName: isCallConnected ? (coordinator.callAudioService.isUsingHeadphones ? "headphones" : "mic.fill") : "phone.down.waves.left.and.right")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.green)
             }
@@ -372,7 +369,7 @@ public struct MainConnectView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
-                    if call.isAnsweredOnMac {
+                    if isCallConnected {
                         Text(coordinator.callAudioService.formattedCallDuration)
                             .font(.system(size: 11, weight: .semibold).monospacedDigit())
                             .foregroundStyle(.green)
@@ -384,12 +381,12 @@ public struct MainConnectView: View {
                 }
                 Text(call.stateDescription)
                     .font(.system(size: 11))
-                    .foregroundStyle(call.isAnsweredOnMac ? Color(red: 0.11, green: 0.54, blue: 0.34) : .secondary)
+                    .foregroundStyle(isCallConnected ? Color(red: 0.11, green: 0.54, blue: 0.34) : (call.isAnswerPendingOnMac ? .blue : .secondary))
             }
 
             Spacer()
 
-            if call.isAnsweredOnMac {
+            if isCallConnected {
                 Button {
                     coordinator.toggleCallMicrophoneMute()
                 } label: {
@@ -421,7 +418,7 @@ public struct MainConnectView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 5)
-                    .background(Color(red: 0.16, green: 0.74, blue: 0.42))
+                    .background(Color(red: 0.16, green: 0.78, blue: 0.37))
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -442,7 +439,7 @@ public struct MainConnectView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 5)
-                .background(Color.red)
+                .background(Color(red: 0.95, green: 0.23, blue: 0.21))
                 .clipShape(Capsule())
             }
             .buttonStyle(.plain)

@@ -104,15 +104,16 @@ public struct MenuBarConnectView: View {
             if let call = coordinator.activeIncomingCall {
                 Divider().opacity(0.45)
 
+                let isCallConnected = (call.callState == 3)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(call.isAnsweredOnMac ? "正在通话中" : "手机来电")
+                        Text(isCallConnected ? "正在通话中" : "手机来电")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text(call.isAnsweredOnMac ? CallAudioRelayService.shared.formattedCallDuration : call.location)
+                        Text(isCallConnected ? CallAudioRelayService.shared.formattedCallDuration : call.location)
                             .font(.system(size: 12).monospacedDigit())
-                            .foregroundStyle(call.isAnsweredOnMac ? Color(red: 0.11, green: 0.54, blue: 0.34) : .secondary)
+                            .foregroundStyle(isCallConnected ? Color(red: 0.11, green: 0.54, blue: 0.34) : .secondary)
                     }
 
                     HStack(spacing: 8) {
@@ -123,7 +124,7 @@ public struct MenuBarConnectView: View {
 
                         Spacer()
 
-                        if call.isAnsweredOnMac {
+                        if isCallConnected {
                             Button {
                                 coordinator.toggleCallMicrophoneMute()
                             } label: {
@@ -142,13 +143,17 @@ public struct MenuBarConnectView: View {
                             Button {
                                 coordinator.answerCurrentCallOnMac()
                             } label: {
-                                Text("接听")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(Color(red: 0.16, green: 0.68, blue: 0.38))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                HStack(spacing: 4) {
+                                    Image(systemName: CallAudioRelayService.shared.isUsingHeadphones ? "headphones" : "phone.fill")
+                                        .font(.system(size: 11, weight: .bold))
+                                    Text("接听")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color(red: 0.16, green: 0.78, blue: 0.37))
+                                .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
                         }
@@ -156,24 +161,30 @@ public struct MenuBarConnectView: View {
                         Button {
                             coordinator.hangupCurrentCall()
                         } label: {
-                            Text("挂断")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 6)
-                                .background(Color.red)
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            HStack(spacing: 4) {
+                                Image(systemName: "phone.down.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("挂断")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color(red: 0.95, green: 0.23, blue: 0.21))
+                            .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
                     }
 
                     Text(
-                        call.isAnsweredOnMac
+                        isCallConnected
                             ? "麦克风：\(CallAudioRelayService.shared.activeInputDeviceName)"
-                            : "点击接听将使用 \(CallAudioRelayService.shared.activeInputDeviceName) 通话"
+                            : (call.isAnswerPendingOnMac
+                               ? "已请求接听 · 轻按耳机或手机确认（使用 \(CallAudioRelayService.shared.activeInputDeviceName)）"
+                               : "点击接听将使用 \(CallAudioRelayService.shared.activeInputDeviceName) 通话")
                     )
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(call.isAnswerPendingOnMac ? .blue : .secondary)
                     .lineLimit(1)
                 }
                 .padding(16)

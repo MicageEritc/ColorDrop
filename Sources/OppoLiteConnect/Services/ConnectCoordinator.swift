@@ -720,15 +720,29 @@ public final class ConnectCoordinator: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if var incoming = callItem {
-                    if let current = self.activeIncomingCall, current.id == incoming.id, current.isAnsweredOnMac {
+                    self.callAudioService.refreshAudioDeviceRoute()
+                    incoming.activeAudioDeviceName = self.callAudioService.activeInputDeviceName
+                    if incoming.callState == 3 {
                         incoming.isAnsweredOnMac = true
-                        incoming.connectedAt = current.connectedAt ?? Date()
-                        incoming.activeAudioDeviceName = self.callAudioService.activeInputDeviceName
+                        incoming.isAnswerPendingOnMac = false
+                        if let current = self.activeIncomingCall, current.id == incoming.id, let existingStart = current.connectedAt {
+                            incoming.connectedAt = existingStart
+                        } else {
+                            incoming.connectedAt = Date()
+                        }
+                        self.callAudioService.startActiveCallSession(phoneIP: self.connectedDevice?.lanIP ?? "")
+                        self.statusBanner = "通话已接通 · 正在使用 \(incoming.activeAudioDeviceName)"
+                    } else if incoming.callState == 4 {
+                        if let current = self.activeIncomingCall, current.id == incoming.id {
+                            incoming.isAnswerPendingOnMac = current.isAnswerPendingOnMac
+                        }
                     }
                     self.activeIncomingCall = incoming
+                    IncomingCallBannerController.shared.updateBanner(for: incoming, coordinator: self)
                 } else {
                     self.callAudioService.stopCallRelay()
                     self.activeIncomingCall = nil
+                    IncomingCallBannerController.shared.updateBanner(for: nil, coordinator: self)
                 }
             }
         }
@@ -750,6 +764,7 @@ public final class ConnectCoordinator: ObservableObject {
                 guard let self else { return }
                 if self.activeIncomingCall != nil {
                     self.activeIncomingCall?.activeAudioDeviceName = inputName
+                    IncomingCallBannerController.shared.updateBanner(for: self.activeIncomingCall, coordinator: self)
                 }
             }
         }
@@ -2399,17 +2414,24 @@ public final class ConnectCoordinator: ObservableObject {
     // MARK: - Incoming Call Answer (Mac Microphone / Headphone Relay) & Hangup
 
     public func answerCurrentCallOnMac(explicitCallId: String? = nil, explicitNumber: String? = nil) {
-        callAudioService.refreshAudioDeviceRoute()
+        callAudioService.prepareAndRequestCallAnswer(phoneIP: connectedDevice?.lanIP ?? "")
         let micName = callAudioService.activeInputDeviceName
 
         if var call = activeIncomingCall {
-            call.callState = 3
-            call.isAnsweredOnMac = true
-            call.connectedAt = Date()
             call.activeAudioDeviceName = micName
+            if call.callState == 3 {
+                call.isAnsweredOnMac = true
+                call.isAnswerPendingOnMac = false
+                if call.connectedAt == nil { call.connectedAt = Date() }
+                callAudioService.startActiveCallSession(phoneIP: connectedDevice?.lanIP ?? "")
+                statusBanner = "正在使用 \(micName) 通话"
+            } else {
+                // Keep callState == 4 until the phone confirms callState == 3 via incallui_info!
+                call.isAnswerPendingOnMac = true
+                statusBanner = "已发送接听请求（已绑定 \(micName)）"
+            }
             activeIncomingCall = call
-            callAudioService.startCallRelay(phoneIP: connectedDevice?.lanIP ?? "")
-            statusBanner = "已接听 \(call.displayTitle) · 正在使用 \(micName) 通话"
+            IncomingCallBannerController.shared.updateBanner(for: call, coordinator: self)
             let notifyKey = smsService.latestCallNotificationKey
             Task {
                 await dspClient.answerIncomingCall(
@@ -2420,21 +2442,8 @@ public final class ConnectCoordinator: ObservableObject {
             }
         } else if let cid = explicitCallId {
             let num = explicitNumber ?? ""
-            let fallbackCall = IncomingCallItem(
-                id: cid,
-                number: num,
-                callerDisplayName: num,
-                location: "",
-                callState: 3,
-                receivedAt: Date(),
-                isAnsweredOnMac: true,
-                connectedAt: Date(),
-                activeAudioDeviceName: micName
-            )
-            activeIncomingCall = fallbackCall
-            callAudioService.startCallRelay(phoneIP: connectedDevice?.lanIP ?? "")
-            statusBanner = "已接听 · 正在使用 \(micName) 通话"
             let notifyKey = smsService.latestCallNotificationKey
+            statusBanner = "已发送接听请求（已绑定 \(micName)）"
             Task {
                 await dspClient.answerIncomingCall(
                     callId: cid,
@@ -2449,6 +2458,7 @@ public final class ConnectCoordinator: ObservableObject {
         callAudioService.toggleMicrophoneMute()
         let muted = callAudioService.isMicrophoneMuted
         statusBanner = muted ? "通话麦克风已静音" : "通话麦克风已取消静音 (\(callAudioService.activeInputDeviceName))"
+        IncomingCallBannerController.shared.updateBanner(for: activeIncomingCall, coordinator: self)
     }
 
     public func hangupCurrentCall(explicitCallId: String? = nil, explicitNumber: String? = nil) {
@@ -2457,6 +2467,7 @@ public final class ConnectCoordinator: ObservableObject {
         let title = activeIncomingCall?.displayTitle ?? (number.isEmpty ? "当前通话" : number)
         callAudioService.stopCallRelay()
         activeIncomingCall = nil
+        IncomingCallBannerController.shared.dismissBanner()
         statusBanner = "已挂断 \(title) 的通话"
         Task {
             await dspClient.hangupIncomingCall(callId: callId, phoneNumber: number)

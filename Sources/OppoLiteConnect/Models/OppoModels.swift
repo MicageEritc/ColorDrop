@@ -520,8 +520,10 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
     public var avatarBase64: String?
     public var receivedAt: Date
     public var isAnsweredOnMac: Bool
+    public var isAnswerPendingOnMac: Bool
     public var connectedAt: Date?
     public var activeAudioDeviceName: String
+    public var smsReplyOptions: [String]
 
     public var displayTitle: String {
         let trimmed = callerDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -531,12 +533,15 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
     }
 
     public var stateDescription: String {
-        if isAnsweredOnMac && callState == 3 {
-            let dev = activeAudioDeviceName.isEmpty ? "Mac 麦克风" : activeAudioDeviceName
+        let dev = activeAudioDeviceName.isEmpty ? "Mac 麦克风" : activeAudioDeviceName
+        if callState == 3 {
             return "正在使用 \(dev) 通话中"
         }
+        if callState == 4 && isAnswerPendingOnMac {
+            return "已发送接听请求（若未自动接通请轻按耳机或手机确认，接通后使用 \(dev)）"
+        }
         switch callState {
-        case 4: return "正在来电响铃 · 可在 Mac 直接接听或挂断"
+        case 4: return "正在来电响铃 · 可直接点击接听或挂断"
         case 3: return "正在通话中"
         case 10: return "通话已结束"
         default: return "手机通话通知"
@@ -552,8 +557,10 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
         avatarBase64: String? = nil,
         receivedAt: Date = Date(),
         isAnsweredOnMac: Bool = false,
+        isAnswerPendingOnMac: Bool = false,
         connectedAt: Date? = nil,
-        activeAudioDeviceName: String = ""
+        activeAudioDeviceName: String = "",
+        smsReplyOptions: [String] = []
     ) {
         self.id = id
         self.number = number
@@ -563,8 +570,10 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
         self.avatarBase64 = avatarBase64
         self.receivedAt = receivedAt
         self.isAnsweredOnMac = isAnsweredOnMac
+        self.isAnswerPendingOnMac = isAnswerPendingOnMac
         self.connectedAt = connectedAt
         self.activeAudioDeviceName = activeAudioDeviceName
+        self.smsReplyOptions = smsReplyOptions
     }
 }
 
@@ -573,6 +582,13 @@ public struct IncomingCallItem: Identifiable, Hashable, Codable {
 public enum ClipboardItemSource: String, Codable, Hashable {
     case mac = "本机 Mac"
     case phone = "手机"
+
+    public var iconName: String {
+        switch self {
+        case .phone: return "iphone"
+        case .mac: return "laptopcomputer"
+        }
+    }
 }
 
 public struct ClipboardHistoryItem: Identifiable, Hashable, Codable {

@@ -3,12 +3,12 @@ import AVFoundation
 import CoreAudio
 import AudioToolbox
 
-/// Manages macOS Call Audio Relay ("电话流转"):
-/// - Automatically detects the Mac's current default audio input (microphone) and output devices via CoreAudio.
-/// - If headphones (AirPods, Bluetooth headset, wired headset, or USB headset) are connected to the Mac,
-///   automatically uses the headphones' microphone and speaker and dynamically follows mid-call route changes.
-/// - Captures live microphone audio via `AVAudioEngine`, computes real-time voice level, supports mute/unmute,
-///   and coordinates call answer signaling with the connected phone.
+/// Manages macOS Call Audio Routing & Headphone / Microphone Binding:
+/// - Uses 100% exception-free CoreAudio C APIs (`AudioObjectGetPropertyData` / `AudioObjectSetPropertyData`)
+///   with proper `Unmanaged<CFString>` ARC bridging (never calling `AVAudioEngine.inputNode.installTap`,
+///   which can throw uncaught Objective-C `NSException`s during Bluetooth AirPods A2DP <-> HFP sample rate switches).
+/// - Automatically detects connected headphones (AirPods, Bluetooth headset, wired headset, USB headset),
+///   prefers the headphone microphone & speaker when active, and supports hardware input mute toggling.
 @MainActor
 public final class CallAudioRelayService: ObservableObject {
     public static let shared = CallAudioRelayService()
@@ -18,22 +18,21 @@ public final class CallAudioRelayService: ObservableObject {
     @Published public private(set) var activeInputDeviceName: String = "Mac 麦克风"
     @Published public private(set) var activeOutputDeviceName: String = "Mac 扬声器"
     @Published public private(set) var isUsingHeadphones: Bool = false
-    @Published public private(set) var micInputLevel: Double = 0.0
     @Published public private(set) var callDurationSeconds: Int = 0
 
     public var onAudioRouteChanged: ((String, Bool) -> Void)?
 
-    private var audioEngine: AVAudioEngine?
     private var durationTimer: Timer?
     private var callStartTime: Date?
     private var hasInstalledCoreAudioListener = false
+    private var routeListenerDebounceWorkItem: DispatchWorkItem?
 
     private init() {
         refreshAudioDeviceRoute()
         installCoreAudioRouteListenerIfNeeded()
     }
 
-    // MARK: - CoreAudio Default Input / Output & Headphone Detection
+    // MARK: - CoreAudio Default Input / Output & Headphone Detection (100% ARC-Safe)
 
     public func refreshAudioDeviceRoute() {
         let inputInfo = Self.queryAudioDeviceInfo(isInput: true)
@@ -43,12 +42,10 @@ public final class CallAudioRelayService: ObservableObject {
         self.isUsingHeadphones = headSetConnected
 
         if headSetConnected {
-            let baseName = !inputInfo.name.isEmpty ? inputInfo.name : (!outputInfo.name.isEmpty ? outputInfo.name : "外接耳机")
-            if baseName.contains("麦克风") || baseName.contains("耳机") || baseName.lowercased().contains("airpods") {
-                self.activeInputDeviceName = baseName
-            } else {
-                self.activeInputDeviceName = "\(baseName) 耳机麦克风"
-            }
+            let preferredName = outputInfo.isHeadphoneOrExternal && !outputInfo.name.isEmpty
+                ? outputInfo.name
+                : (!inputInfo.name.isEmpty ? inputInfo.name : "外接耳机")
+            self.activeInputDeviceName = preferredName
         } else {
             self.activeInputDeviceName = inputInfo.name.isEmpty ? "Mac 内置麦克风" : inputInfo.name
         }
@@ -56,7 +53,7 @@ public final class CallAudioRelayService: ObservableObject {
         onAudioRouteChanged?(self.activeInputDeviceName, self.isUsingHeadphones)
     }
 
-    public nonisolated static func queryAudioDeviceInfo(isInput: Bool) -> (name: String, isHeadphoneOrExternal: Bool) {
+    public nonisolated static func queryAudioDeviceInfo(isInput: Bool) -> (id: AudioDeviceID, name: String, isHeadphoneOrExternal: Bool) {
         var deviceID = AudioDeviceID(0)
         var propSize = UInt32(MemoryLayout<AudioDeviceID>.size)
         var address = AudioObjectPropertyAddress(
@@ -74,23 +71,34 @@ public final class CallAudioRelayService: ObservableObject {
             &deviceID
         )
         guard status == noErr, deviceID != kAudioObjectUnknown else {
-            return (isInput ? "Mac 麦克风" : "Mac 扬声器", false)
+            return (0, isInput ? "Mac 麦克风" : "Mac 扬声器", false)
         }
 
-        // 1. Read Device Name
-        var nameCF: CFString = "" as CFString
-        var nameSize = UInt32(MemoryLayout<CFString>.size)
+        let deviceName = readDeviceNameSafely(deviceID: deviceID)
+        let transportType = readTransportType(deviceID: deviceID)
+        let isExternal = classifyHeadphoneOrExternal(name: deviceName, transportType: transportType)
+        return (deviceID, deviceName, isExternal)
+    }
+
+    /// Reads `kAudioObjectPropertyName` using `Unmanaged<CFString>?` so Swift ARC never double-frees or corrupts memory.
+    private nonisolated static func readDeviceNameSafely(deviceID: AudioDeviceID) -> String {
+        var unmanagedName: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         var nameAddr = AudioObjectPropertyAddress(
             mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let nameStatus = withUnsafeMutablePointer(to: &nameCF) { ptr in
+        let status = withUnsafeMutablePointer(to: &unmanagedName) { ptr in
             AudioObjectGetPropertyData(deviceID, &nameAddr, 0, nil, &nameSize, ptr)
         }
-        let deviceName = (nameStatus == noErr) ? (nameCF as String).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        guard status == noErr, let cfStr = unmanagedName?.takeRetainedValue() else {
+            return ""
+        }
+        return (cfStr as String).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        // 2. Read Transport Type (Bluetooth / BluetoothLE / USB / Headphones)
+    private nonisolated static func readTransportType(deviceID: AudioDeviceID) -> UInt32 {
         var transportType: UInt32 = 0
         var transportSize = UInt32(MemoryLayout<UInt32>.size)
         var transportAddr = AudioObjectPropertyAddress(
@@ -99,8 +107,11 @@ public final class CallAudioRelayService: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
         _ = AudioObjectGetPropertyData(deviceID, &transportAddr, 0, nil, &transportSize, &transportType)
+        return transportType
+    }
 
-        let lowerName = deviceName.lowercased()
+    private nonisolated static func classifyHeadphoneOrExternal(name: String, transportType: UInt32) -> Bool {
+        let lowerName = name.lowercased()
         let isBT = (transportType == kAudioDeviceTransportTypeBluetooth)
             || (transportType == kAudioDeviceTransportTypeBluetoothLE)
         let isUSB = (transportType == kAudioDeviceTransportTypeUSB)
@@ -112,10 +123,92 @@ public final class CallAudioRelayService: ObservableObject {
             || lowerName.contains("beats")
             || lowerName.contains("sony")
             || lowerName.contains("bose")
-            || deviceName.contains("耳机")
-            || deviceName.contains("耳麦")
+            || name.contains("耳机")
+            || name.contains("耳麦")
+        return isBT || isUSB || isHeadphoneKeyword
+    }
 
-        return (deviceName, isBT || isUSB || isHeadphoneKeyword)
+    /// Ensures that if headphones (e.g. AirPods Pro) are currently the active output device,
+    /// their matching microphone input device is also selected as the default macOS input device.
+    public nonisolated static func bindHeadphoneMicrophoneAsDefaultInputIfNeeded() {
+        let outputInfo = queryAudioDeviceInfo(isInput: false)
+        let inputInfo = queryAudioDeviceInfo(isInput: true)
+        guard outputInfo.isHeadphoneOrExternal, !inputInfo.isHeadphoneOrExternal else {
+            setHardwareInputMute(deviceID: inputInfo.id, muted: false)
+            return
+        }
+
+        // Enumerate all audio devices to find the input device matching the connected headphones
+        var propAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &propAddress, 0, nil, &dataSize) == noErr,
+              dataSize > 0 else {
+            return
+        }
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propAddress, 0, nil, &dataSize, &deviceIDs) == noErr else {
+            return
+        }
+
+        for candidateID in deviceIDs where hasInputChannels(deviceID: candidateID) {
+            let name = readDeviceNameSafely(deviceID: candidateID)
+            let transport = readTransportType(deviceID: candidateID)
+            if name == outputInfo.name || classifyHeadphoneOrExternal(name: name, transportType: transport) {
+                var mutableID = candidateID
+                var defaultInputAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                _ = AudioObjectSetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject),
+                    &defaultInputAddr,
+                    0,
+                    nil,
+                    UInt32(MemoryLayout<AudioDeviceID>.size),
+                    &mutableID
+                )
+                setHardwareInputMute(deviceID: candidateID, muted: false)
+                break
+            }
+        }
+    }
+
+    private nonisolated static func hasInputChannels(deviceID: AudioDeviceID) -> Bool {
+        var streamAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        let status = AudioObjectGetPropertyDataSize(deviceID, &streamAddr, 0, nil, &size)
+        return status == noErr && size > 0
+    }
+
+    private nonisolated static func setHardwareInputMute(deviceID: AudioDeviceID, muted: Bool) {
+        guard deviceID != 0, deviceID != kAudioObjectUnknown else { return }
+        var muteVal: UInt32 = muted ? 1 : 0
+        var muteAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var isSettable: DarwinBoolean = false
+        if AudioObjectIsPropertySettable(deviceID, &muteAddr, &isSettable) == noErr, isSettable.boolValue {
+            _ = AudioObjectSetPropertyData(
+                deviceID,
+                &muteAddr,
+                0,
+                nil,
+                UInt32(MemoryLayout<UInt32>.size),
+                &muteVal
+            )
+        }
     }
 
     private func installCoreAudioRouteListenerIfNeeded() {
@@ -136,10 +229,14 @@ public final class CallAudioRelayService: ObservableObject {
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.refreshAudioDeviceRoute()
-                if self.isRelayActive {
-                    self.rebindMicrophoneEngineIfNeeded()
+                self.routeListenerDebounceWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.refreshAudioDeviceRoute()
+                    }
                 }
+                self.routeListenerDebounceWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
             }
         }
 
@@ -157,29 +254,37 @@ public final class CallAudioRelayService: ObservableObject {
         )
     }
 
-    // MARK: - Start / Stop Mac Call Audio & Microphone Relay
+    // MARK: - Prepare Audio Route & Start / Stop Call Session
 
-    public func startCallRelay(phoneIP: String) {
+    /// Prepares the Mac's microphone / headphone input route and attempts to answer the ringing call on the phone.
+    public func prepareAndRequestCallAnswer(phoneIP: String) {
+        Self.bindHeadphoneMicrophoneAsDefaultInputIfNeeded()
         refreshAudioDeviceRoute()
-        isRelayActive = true
         isMicrophoneMuted = false
-        callStartTime = Date()
-        callDurationSeconds = 0
 
-        durationTimer?.invalidate()
-        durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let start = self.callStartTime else { return }
-                self.callDurationSeconds = max(0, Int(Date().timeIntervalSince(start)))
-            }
-        }
-
-        // Trigger Android / ColorOS call answer via ADB if available on the local machine
         Task.detached(priority: .userInitiated) {
             Self.tryAnswerCallViaADBIfAvailable(phoneIP: phoneIP)
         }
+    }
 
-        requestMicPermissionAndStartEngine()
+    /// Starts the active in-call session timer once the call is confirmed active (`callState == 3`).
+    public func startActiveCallSession(phoneIP: String) {
+        Self.bindHeadphoneMicrophoneAsDefaultInputIfNeeded()
+        refreshAudioDeviceRoute()
+        if !isRelayActive {
+            isRelayActive = true
+            isMicrophoneMuted = false
+            callStartTime = Date()
+            callDurationSeconds = 0
+
+            durationTimer?.invalidate()
+            durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, let start = self.callStartTime else { return }
+                    self.callDurationSeconds = max(0, Int(Date().timeIntervalSince(start)))
+                }
+            }
+        }
     }
 
     public func stopCallRelay() {
@@ -187,22 +292,18 @@ public final class CallAudioRelayService: ObservableObject {
         durationTimer = nil
         callStartTime = nil
         callDurationSeconds = 0
-        micInputLevel = 0.0
+        if isMicrophoneMuted {
+            let inputInfo = Self.queryAudioDeviceInfo(isInput: true)
+            Self.setHardwareInputMute(deviceID: inputInfo.id, muted: false)
+        }
         isMicrophoneMuted = false
         isRelayActive = false
-
-        if let engine = audioEngine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        }
-        audioEngine = nil
     }
 
     public func toggleMicrophoneMute() {
         isMicrophoneMuted.toggle()
-        if isMicrophoneMuted {
-            micInputLevel = 0.0
-        }
+        let inputInfo = Self.queryAudioDeviceInfo(isInput: true)
+        Self.setHardwareInputMute(deviceID: inputInfo.id, muted: isMicrophoneMuted)
     }
 
     public var formattedCallDuration: String {
@@ -211,80 +312,32 @@ public final class CallAudioRelayService: ObservableObject {
         return String(format: "%02d:%02d", mins, secs)
     }
 
-    private func requestMicPermissionAndStartEngine() {
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        switch status {
-        case .authorized:
-            startAVAudioEngineTap()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                guard granted else { return }
-                Task { @MainActor [weak self] in
-                    self?.startAVAudioEngineTap()
-                }
-            }
-        default:
-            break
-        }
-    }
-
-    private func rebindMicrophoneEngineIfNeeded() {
-        guard isRelayActive else { return }
-        startAVAudioEngineTap()
-    }
-
-    private func startAVAudioEngineTap() {
-        if let existing = audioEngine {
-            existing.inputNode.removeTap(onBus: 0)
-            existing.stop()
-        }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            return
-        }
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let channelData = buffer.floatChannelData?[0] else { return }
-            let frameLength = Int(buffer.frameLength)
-            guard frameLength > 0 else { return }
-
-            var sumSquares: Float = 0.0
-            for i in 0..<frameLength {
-                let sample = channelData[i]
-                sumSquares += sample * sample
-            }
-            let rms = sqrt(sumSquares / Float(frameLength))
-            let normalizedLevel = min(1.0, Double(rms * 8.5))
-
-            Task { @MainActor [weak self] in
-                guard let self, self.isRelayActive else { return }
-                if self.isMicrophoneMuted {
-                    self.micInputLevel = 0.0
-                } else {
-                    self.micInputLevel = normalizedLevel
-                }
-            }
-        }
-
-        do {
-            engine.prepare()
-            try engine.start()
-            self.audioEngine = engine
-        } catch {
-            self.audioEngine = nil
-        }
-    }
-
     private nonisolated static func tryAnswerCallViaADBIfAvailable(phoneIP: String) {
-        let adbCandidates = ["/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/usr/bin/adb"]
+        let adbCandidates = [
+            "/tmp/oppolite-oppodat/adb",
+            Bundle.main.bundlePath + "/Contents/Resources/Vendor/adb",
+            "/opt/homebrew/bin/adb",
+            "/usr/local/bin/adb",
+            "/usr/bin/adb"
+        ]
         guard let adbPath = adbCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             return
         }
-        // Send telecom accept-ringing-call and KEYCODE_CALL (5)
-        for args in [["shell", "cmd", "telecom", "accept-ringing-call"], ["shell", "input", "keyevent", "5"]] {
+        let cleanIP = phoneIP.split(separator: ":").first.map(String.init) ?? ""
+        if !cleanIP.isEmpty && !cleanIP.hasPrefix("*") && cleanIP != "127.0.0.1" {
+            let connectTask = Process()
+            connectTask.executableURL = URL(fileURLWithPath: adbPath)
+            connectTask.arguments = ["connect", "\(cleanIP):5555"]
+            connectTask.standardOutput = FileHandle.nullDevice
+            connectTask.standardError = FileHandle.nullDevice
+            try? connectTask.run()
+            connectTask.waitUntilExit()
+        }
+        for args in [
+            ["shell", "cmd", "telecom", "accept-ringing-call"],
+            ["shell", "input", "keyevent", "5"],
+            ["shell", "input", "keyevent", "79"]
+        ] {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: adbPath)
             task.arguments = args
