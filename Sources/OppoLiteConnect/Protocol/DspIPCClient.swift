@@ -324,6 +324,39 @@ public final class DspIPCClient: @unchecked Sendable {
         osa.waitUntilExit()
     }
 
+    /// Cleanly terminates the daemon and removes Unix sockets when ColorDrop quits so no orphan daemon is left running.
+    public func terminateDaemonOnAppQuit() {
+        DiagnosticLogService.shared.log("应用退出，正在清理守护进程与残留 Socket", category: "Daemon")
+        daemonProcess?.terminate()
+        let killer = Process()
+        killer.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        killer.arguments = ["-9", "O+Connect Service"]
+        killer.standardOutput = FileHandle.nullDevice
+        killer.standardError = FileHandle.nullDevice
+        try? killer.run()
+        killer.waitUntilExit()
+        unlink(dspSocketPath)
+        unlink(eventSocketPath)
+    }
+
+    private func markNeedsDaemonRestart() {
+        lock.lock()
+        needsDaemonRestart = true
+        lock.unlock()
+    }
+
+    /// Kills a zombie/half-dead `O+Connect Service` (e.g. `404 · 02-005-001: No socket is alive.`),
+    /// cleans up stale sockets, and spawns a fresh daemon instance.
+    public func forceRestartDaemon(reason: String) async {
+        DiagnosticLogService.shared.log("触发守护进程强制自愈重启: \(reason)", level: "WARN", category: "Daemon")
+        markNeedsDaemonRestart()
+        ensureCoreDaemonRunning()
+        for _ in 0..<30 {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if isDaemonAvailable { break }
+        }
+    }
+
     public func ensureCoreDaemonRunning() {
         prepareDaemonBinaryIfNeeded()
         lock.lock()
@@ -365,7 +398,7 @@ public final class DspIPCClient: @unchecked Sendable {
 
                 let killer = Process()
                 killer.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-                killer.arguments = ["O+Connect Service"]
+                killer.arguments = ["-9", "O+Connect Service"]
                 killer.standardOutput = FileHandle.nullDevice
                 killer.standardError = FileHandle.nullDevice
                 try? killer.run()
@@ -381,11 +414,14 @@ public final class DspIPCClient: @unchecked Sendable {
                 do {
                     try proc.run()
                     self.daemonProcess = proc
+                    DiagnosticLogService.shared.log("已启动全新 O+Connect Service 守护进程 (PID: \(proc.processIdentifier))", category: "Daemon")
                     for _ in 0..<25 {
                         Thread.sleep(forTimeInterval: 0.2)
                         if self.isDaemonAvailable { break }
                     }
-                } catch {}
+                } catch {
+                    DiagnosticLogService.shared.log("启动守护进程失败: \(error.localizedDescription)", level: "ERROR", category: "Daemon")
+                }
             }
             self.startEventSubscriptionsIfNeeded()
         }
@@ -735,9 +771,29 @@ public final class DspIPCClient: @unchecked Sendable {
         _ = try? await request(path: uri, timeoutMs: 2500)
     }
 
+    /// Triggers `/discovery_query?scope=1&params={"is":1}` to flush the daemon's `publish_on_agent_found_no_repeatedly` filter
+    /// AND verifies that the daemon's discovery socket has not died (`404 · 02-005-001: No socket is alive.`).
+    @discardableResult
+    public func probeDevicesAndCheckHealth() async -> (healthy: Bool, reason: String?) {
+        guard isDaemonAvailable else {
+            return (false, "IPC socket 不可达")
+        }
+        let uri = buildIpcUri(path: "/discovery_query", scope: 1, params: ["is": 1])
+        do {
+            let resp = try await request(path: uri, timeoutMs: 3000)
+            let status = (resp["status"] as? Int) ?? 0
+            let msg = (resp["msg"] as? String) ?? ""
+            if status == 404 || msg.contains("02-005-001") || msg.contains("No socket is alive") {
+                return (false, "discovery_query 异常 (\(status) · \(msg))")
+            }
+            return (true, nil)
+        } catch {
+            return (false, "discovery_query 请求超时: \(error.localizedDescription)")
+        }
+    }
+
     public func probeDevices() async {
-        let uri = buildIpcUri(path: "/probe_devices", scope: 1, params: nil)
-        _ = try? await request(path: uri, timeoutMs: 3000)
+        _ = await probeDevicesAndCheckHealth()
     }
 
     public static func buildFormattedQRCodeUrl(

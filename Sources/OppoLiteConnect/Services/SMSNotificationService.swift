@@ -5,7 +5,10 @@ import UserNotifications
 /// SMS & Phone Call Notification Synchronization Service
 ///
 /// Listens to `Oplus_HeySynergy_PcConnect_SyncNotification_Publisher` and `Oplus_MacConnect`:
-/// - Delivers native macOS SMS notifications via `UNUserNotificationCenter`.
+/// - Extracts the real phone notification timestamp (`headerView.whenTime` / `whenTime` / `postTime`) so the timeline
+///   in ColorDrop matches the phone 100%.
+/// - Persists delivered notification signatures on disk (`/tmp/oppolite-oppodat/delivered_notifications.json`) so unread
+///   notifications on the phone are pushed to macOS Notification Center strictly ONCE and never re-popped on reconnect.
 /// - Delivers native macOS incoming call notifications via `UNUserNotificationCenter` with only a "挂断" (Hangup) action.
 public final class SMSNotificationService: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     public static let shared = SMSNotificationService()
@@ -50,6 +53,11 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
     private var _blockedNonSMSCount: Int = 0
     private var recentSMSItems: [SMSNotificationItem] = []
     private var lastDeliveredCallStates: [String: Int] = [:]
+    private var callStartDates: [String: Date] = [:]
+    private var deliveredNotificationSignatures: [String] = []
+    private var deliveredSignatureSet: Set<String> = []
+    private let deliveredSignaturesFilePath = "/tmp/oppolite-oppodat/delivered_notifications.json"
+    private let maxStoredSignatures = 600
 
     public var blockedNonSMSCount: Int {
         lock.lock()
@@ -64,7 +72,142 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
 
     public override init() {
         super.init()
+        loadDeliveredSignaturesFromDisk()
         configureInteractiveNotificationCategories()
+    }
+
+    /// Seeds existing message history from `ConnectCoordinator` on launch so historical items are never re-popped.
+    public func seedExistingHistory(_ items: [SMSNotificationItem]) {
+        lock.lock()
+        for item in items {
+            if !recentSMSItems.contains(where: { $0.id == item.id }) {
+                recentSMSItems.append(item)
+            }
+            for sig in Self.computeSignatures(
+                id: item.id,
+                category: item.category,
+                senderTitle: item.senderTitle,
+                content: item.content,
+                date: item.receivedAt
+            ) {
+                recordSignatureLocked(sig)
+            }
+        }
+        saveDeliveredSignaturesLocked()
+        lock.unlock()
+    }
+
+    private func loadDeliveredSignaturesFromDisk() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: deliveredSignaturesFilePath)),
+              let arr = try? JSONDecoder().decode([String].self, from: data) else {
+            return
+        }
+        lock.lock()
+        deliveredNotificationSignatures = arr
+        deliveredSignatureSet = Set(arr)
+        lock.unlock()
+    }
+
+    private func recordSignatureLocked(_ sig: String) {
+        guard !sig.isEmpty, !deliveredSignatureSet.contains(sig) else { return }
+        deliveredSignatureSet.insert(sig)
+        deliveredNotificationSignatures.append(sig)
+        if deliveredNotificationSignatures.count > maxStoredSignatures {
+            let removed = deliveredNotificationSignatures.removeFirst()
+            deliveredSignatureSet.remove(removed)
+        }
+    }
+
+    private func saveDeliveredSignaturesLocked() {
+        let snapshot = deliveredNotificationSignatures
+        if let data = try? JSONEncoder().encode(snapshot) {
+            try? data.write(to: URL(fileURLWithPath: deliveredSignaturesFilePath), options: .atomic)
+        }
+    }
+
+    private static func computeSignatures(
+        id: String,
+        category: NotificationCategory,
+        senderTitle: String,
+        content: String,
+        date: Date
+    ) -> [String] {
+        let secBucket = Int64(date.timeIntervalSince1970)
+        let minBucket = Int64(date.timeIntervalSince1970 / 60)
+        var sigs: [String] = [
+            "id_ts:\(id)|\(secBucket)",
+            "content_min:\(category.rawValue)|\(senderTitle)|\(content)|\(minBucket)",
+            "id_content:\(id)|\(content)"
+        ]
+        if !id.isEmpty && id.contains("|") {
+            sigs.append("android_key:\(id)|\(secBucket)")
+        }
+        return sigs
+    }
+
+    /// Extracts the real notification timestamp from the phone's payload (`headerView.whenTime`, `whenTime`, `postTime`, etc.)
+    /// so the timeline in ColorDrop matches the phone 100% rather than showing Mac's reconnect time.
+    public static func extractPhoneTimestamp(from payload: [String: Any], fallbackContent: String = "") -> Date? {
+        func parseRawTimestamp(_ anyVal: Any?) -> Date? {
+            guard let raw = anyVal else { return nil }
+            let valDouble: Double?
+            if let i64 = raw as? Int64 {
+                valDouble = Double(i64)
+            } else if let i = raw as? Int {
+                valDouble = Double(i)
+            } else if let d = raw as? Double {
+                valDouble = d
+            } else if let s = raw as? String, let parsed = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                valDouble = parsed
+            } else {
+                valDouble = nil
+            }
+            guard let ts = valDouble, ts > 100_000_000 else { return nil }
+            let seconds = ts > 2_000_000_000 ? (ts / 1000.0) : ts
+            return Date(timeIntervalSince1970: seconds)
+        }
+
+        if let headerView = payload["headerView"] as? [String: Any] {
+            for key in ["whenTime", "when", "postTime", "time", "timestamp"] {
+                if let date = parseRawTimestamp(headerView[key]) {
+                    return date
+                }
+            }
+        }
+        for key in ["whenTime", "postTime", "when", "timestamp", "time", "createTime", "date"] {
+            if let date = parseRawTimestamp(payload[key]) {
+                return date
+            }
+        }
+
+        // Fallback: if SMS body contains an explicit date/time like `11月04日 16:03`, parse it in current year
+        if !fallbackContent.isEmpty {
+            let pattern = "([0-9]{1,2})月([0-9]{1,2})日\\s*([0-9]{1,2}):([0-9]{2})"
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let match = regex.firstMatch(in: fallbackContent, range: NSRange(fallbackContent.startIndex..<fallbackContent.endIndex, in: fallbackContent)),
+               match.numberOfRanges == 5,
+               let rMonth = Range(match.range(at: 1), in: fallbackContent),
+               let rDay = Range(match.range(at: 2), in: fallbackContent),
+               let rHour = Range(match.range(at: 3), in: fallbackContent),
+               let rMin = Range(match.range(at: 4), in: fallbackContent),
+               let month = Int(fallbackContent[rMonth]),
+               let day = Int(fallbackContent[rDay]),
+               let hour = Int(fallbackContent[rHour]),
+               let minute = Int(fallbackContent[rMin]) {
+                var cal = Calendar.current
+                cal.timeZone = .current
+                var comps = cal.dateComponents([.year], from: Date())
+                comps.month = month
+                comps.day = day
+                comps.hour = hour
+                comps.minute = minute
+                comps.second = 0
+                if let parsed = cal.date(from: comps) {
+                    return parsed
+                }
+            }
+        }
+        return nil
     }
 
     /// Registers the `"COLORDROP_INCOMING_CALL"` category on macOS native `UNUserNotificationCenter`
@@ -194,6 +337,19 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             callState = 4
         }
 
+        let now = Date()
+        lock.lock()
+        let prevState = lastDeliveredCallStates[callId]
+        lastDeliveredCallStates[callId] = callState
+        if callState == 4 && callStartDates[callId] == nil {
+            callStartDates[callId] = Self.extractPhoneTimestamp(from: payload) ?? now
+        }
+        let callTimestamp = callStartDates[callId] ?? Self.extractPhoneTimestamp(from: payload) ?? now
+        if callState == 10 {
+            callStartDates.removeValue(forKey: callId)
+        }
+        lock.unlock()
+
         let callItem = IncomingCallItem(
             id: callId,
             number: number,
@@ -201,14 +357,9 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             location: location,
             callState: callState,
             avatarBase64: avatarB64,
-            receivedAt: Date(),
+            receivedAt: callTimestamp,
             smsReplyOptions: smsReplies
         )
-
-        lock.lock()
-        let prevState = lastDeliveredCallStates[callId]
-        lastDeliveredCallStates[callId] = callState
-        lock.unlock()
 
         let callerLabel = callItem.displayTitle
         let callBody = location.isEmpty ? "来电" : "来电 · \(location)"
@@ -217,6 +368,7 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             onActiveCallChanged?(callItem)
             if prevState != 4 {
                 deliverCallMacOSBanner(for: callItem)
+                DiagnosticLogService.shared.log("收到手机来电响铃: \(callerLabel) (\(callBody))", category: "Call")
             }
             let record = SMSNotificationItem(
                 id: "call-\(callId)",
@@ -224,7 +376,7 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
                 senderTitle: callerLabel,
                 content: callBody,
                 verificationCode: nil,
-                receivedAt: Date(),
+                receivedAt: callTimestamp,
                 pkgName: "com.android.incallui",
                 isVerification: false,
                 category: .call,
@@ -239,7 +391,7 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
                 senderTitle: callerLabel,
                 content: location.isEmpty ? "通话中" : "通话中 · \(location)",
                 verificationCode: nil,
-                receivedAt: Date(),
+                receivedAt: callTimestamp,
                 pkgName: "com.android.incallui",
                 isVerification: false,
                 category: .call,
@@ -255,7 +407,7 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
                 senderTitle: callerLabel,
                 content: callBody,
                 verificationCode: nil,
-                receivedAt: Date(),
+                receivedAt: callTimestamp,
                 pkgName: "com.android.incallui",
                 isVerification: false,
                 category: .call,
@@ -268,17 +420,31 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
     }
 
     private func upsertCallRecordInHistory(_ item: SMSNotificationItem) {
+        var finalItem = item
         lock.lock()
         if let idx = recentSMSItems.firstIndex(where: { $0.id == item.id }) {
-            recentSMSItems[idx] = item
+            // Preserve the original call arrival time so ending a call doesn't shift its timeline!
+            finalItem.receivedAt = recentSMSItems[idx].receivedAt
+            finalItem.isRead = recentSMSItems[idx].isRead
+            recentSMSItems[idx] = finalItem
         } else {
-            recentSMSItems.append(item)
+            recentSMSItems.append(finalItem)
         }
+        for sig in Self.computeSignatures(
+            id: finalItem.id,
+            category: finalItem.category,
+            senderTitle: finalItem.senderTitle,
+            content: finalItem.content,
+            date: finalItem.receivedAt
+        ) {
+            recordSignatureLocked(sig)
+        }
+        saveDeliveredSignaturesLocked()
         lock.unlock()
-        onSMSReceived?(item)
+        onSMSReceived?(finalItem)
     }
 
-    // MARK: - Handle Incoming DataBus Notification Event (With Dual-Channel Deduplication)
+    // MARK: - Handle Incoming DataBus Notification Event (With True Phone Timestamp & Persistent Deduplication)
 
     @discardableResult
     public func processIncomingNotification(topicKey: String, payload: [String: Any]) -> SMSNotificationItem? {
@@ -349,22 +515,39 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
         let category: NotificationCategory = isCallNotification ? .call : .sms
 
         let now = Date()
+        let phoneDate = Self.extractPhoneTimestamp(from: payload, fallbackContent: content) ?? now
+        let candidateSignatures = Self.computeSignatures(
+            id: rawId,
+            category: category,
+            senderTitle: finalTitle,
+            content: content,
+            date: phoneDate
+        )
+
         lock.lock()
-        recentSMSItems.removeAll { now.timeIntervalSince($0.receivedAt) > 90 }
+        // Prune only items older than 24 hours (NEVER 90 seconds!) so reconnect replays are always caught
+        recentSMSItems.removeAll { now.timeIntervalSince($0.receivedAt) > 86_400 }
+
+        let alreadyDelivered = candidateSignatures.contains(where: { deliveredSignatureSet.contains($0) })
 
         if let existingIdx = recentSMSItems.firstIndex(where: { existing in
-            if existing.id == rawId { return true }
-            if let c1 = existing.verificationCode, let c2 = extractedCode, !c1.isEmpty, c1 == c2,
-               abs(now.timeIntervalSince(existing.receivedAt)) < 60 {
+            if existing.id == rawId && abs(existing.receivedAt.timeIntervalSince(phoneDate)) < 3600 {
                 return true
             }
-            if existing.content == content && abs(now.timeIntervalSince(existing.receivedAt)) < 60 {
+            if let c1 = existing.verificationCode, let c2 = extractedCode, !c1.isEmpty, c1 == c2,
+               abs(existing.receivedAt.timeIntervalSince(phoneDate)) < 180 {
+                return true
+            }
+            if existing.content == content && existing.senderTitle == finalTitle && abs(existing.receivedAt.timeIntervalSince(phoneDate)) < 3600 {
+                return true
+            }
+            if existing.content == content && abs(existing.receivedAt.timeIntervalSince(phoneDate)) < 90 {
                 return true
             }
             if isCallNotification && existing.category == .call {
                 let normExisting = existing.senderNumber.replacingOccurrences(of: " ", with: "")
                 let normIncoming = finalTitle.replacingOccurrences(of: " ", with: "")
-                if !normIncoming.isEmpty && (normExisting == normIncoming || existing.senderTitle.replacingOccurrences(of: " ", with: "") == normIncoming) && abs(now.timeIntervalSince(existing.receivedAt)) < 30 {
+                if !normIncoming.isEmpty && (normExisting == normIncoming || existing.senderTitle.replacingOccurrences(of: " ", with: "") == normIncoming) && abs(existing.receivedAt.timeIntervalSince(phoneDate)) < 60 {
                     return true
                 }
             }
@@ -384,9 +567,19 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             if merged.verificationCode == nil, let code = extractedCode {
                 merged.verificationCode = code
             }
+            // Keep the accurate phone timestamp (never overwrite with reconnect time!)
+            if Self.extractPhoneTimestamp(from: payload, fallbackContent: content) != nil {
+                merged.receivedAt = phoneDate
+            }
             recentSMSItems[existingIdx] = merged
+            for sig in candidateSignatures { recordSignatureLocked(sig) }
+            saveDeliveredSignaturesLocked()
             lock.unlock()
 
+            DiagnosticLogService.shared.log(
+                "已合并/忽略重连重复同步通知: \(merged.senderTitle) (手机时间: \(merged.formattedTime), key: \(rawId))",
+                category: "Notification"
+            )
             onSMSReceived?(merged)
             return merged
         }
@@ -397,19 +590,37 @@ public final class SMSNotificationService: NSObject, UNUserNotificationCenterDel
             senderTitle: finalTitle,
             content: content,
             verificationCode: extractedCode,
-            receivedAt: now,
+            receivedAt: phoneDate,
             pkgName: pkgName,
             isVerification: isVerif,
             category: category,
             callLocation: callLocation
         )
         recentSMSItems.append(item)
+        for sig in candidateSignatures { recordSignatureLocked(sig) }
+        saveDeliveredSignaturesLocked()
         lock.unlock()
 
-        if autoCopyVerificationCode, let code = extractedCode, !code.isEmpty {
-            copyToClipboard(code)
+        if alreadyDelivered {
+            DiagnosticLogService.shared.log(
+                "已拦截历史已推送通知的重复弹窗: \(item.senderTitle) (手机时间: \(item.formattedTime), key: \(rawId))",
+                category: "Notification"
+            )
+            onSMSReceived?(item)
+            return item
         }
 
+        if autoCopyVerificationCode, let code = extractedCode, !code.isEmpty {
+            // Only auto-copy if the verification SMS arrived within the last 3 minutes
+            if abs(now.timeIntervalSince(phoneDate)) <= 180 {
+                copyToClipboard(code)
+            }
+        }
+
+        DiagnosticLogService.shared.log(
+            "首次推送手机通知至 macOS 通知中心: \(item.senderTitle) (手机时间: \(item.formattedTime), key: \(rawId))",
+            category: "Notification"
+        )
         deliverMacOSBanner(for: item)
         onSMSReceived?(item)
         return item

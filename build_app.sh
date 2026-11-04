@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
-VERSION="${VERSION:-1.1.0}"
+VERSION="${VERSION:-1.1.1}"
 
 if [ -z "${APP_BUNDLE:-}" ]; then
     if [ "${CI:-false}" != "true" ] && [ -d "/Users/micage/Documents/Gemini" ] && [ -w "/Users/micage/Documents/Gemini" ]; then
@@ -25,6 +25,7 @@ xcrun swiftc -O -parse-as-library -target arm64-apple-macosx13.0 \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/DspIPCClient.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/LanSdpDiscovery.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Protocol/OShareEngine.swift" \
+  "$PROJECT_DIR/Sources/OppoLiteConnect/Services/DiagnosticLogService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/ScreenMirrorService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/SMSNotificationService.swift" \
   "$PROJECT_DIR/Sources/OppoLiteConnect/Services/ConnectCoordinator.swift" \

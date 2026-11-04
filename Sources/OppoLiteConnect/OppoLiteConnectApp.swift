@@ -19,7 +19,7 @@ public struct OppoLiteConnectApp {
     }
 
     private static func runSelfTest() {
-        print("=== ColorDrop v1.1.0 原生自检 ===")
+        print("=== ColorDrop v1.1.1 原生自检 ===")
         let discovery = LanSdpDiscovery()
         print("1. 本地设备 ID: \(discovery.localDeviceId) | 局域网 IP: \(discovery.localIPv4) | 本机IP过滤校验: \(discovery.isSelfAddress(discovery.localIPv4))")
         assert(discovery.isSelfAddress(discovery.localIPv4), "Must filter out Mac's own IP address")
@@ -82,9 +82,20 @@ public struct OppoLiteConnectApp {
         ]
         assert(DspIPCClient.extractClipboardText(from: clipPayload) == nil, "Must ignore self-originated macOS clipboard echo")
         assert(DspIPCClient.extractClipboardText(from: phoneClipJson) == "来自手机的复制内容", "Must extract phone clipboard text")
+        let baiduWhenTimePayload: [String: Any] = [
+            "key": "0|com.android.mms|0|com.android.mms:sms::896|10133",
+            "pkgName": "com.android.mms",
+            "headerView": ["label": "信息", "whenTime": Int64(1793779412767)],
+            "contractedChild": ["contractedTitle": "百度", "contractedContent": "【百度】您的账户于11月04日 16:03收到消息"]
+        ]
+        let parsedPhoneDate = SMSNotificationService.extractPhoneTimestamp(from: baiduWhenTimePayload)
+        assert(parsedPhoneDate != nil && Int64((parsedPhoneDate?.timeIntervalSince1970 ?? 0) * 1000) == 1793779412767, "Must extract true phone timestamp whenTime")
+
         let mirrorBundlePath = ScreenMirrorService.shared.locateCastAppBundlePath()
         assert(mirrorBundlePath != nil, "手机投屏.app must be bundled and executable")
-        print("3. 原生 macOS 通知栏来电挂断、跨设备剪贴板协议与官方手机镜像组件校验通过: 短信标题=\(smsAccepted?.senderTitle ?? "") | 来电分类=\(SMSNotificationService.incomingCallCategoryIdentifier) (仅挂断) | 手机镜像组件=\(mirrorBundlePath ?? "")")
+        DiagnosticLogService.shared.log("自检日志写入校验通过", category: "SelfTest")
+        assert(DiagnosticLogService.shared.entryCount > 0, "DiagnosticLogService must record entries")
+        print("3. 真实手机时间戳解析 (whenTime)、重连防重推、日志诊断服务与手机镜像组件校验通过: 短信标题=\(smsAccepted?.senderTitle ?? "") | 来电分类=\(SMSNotificationService.incomingCallCategoryIdentifier) (仅挂断) | 镜像组件=\(mirrorBundlePath ?? "")")
 
         let sampleDev = OppoDevice(
             deviceId: "2B04DFC2AC20",
@@ -122,18 +133,23 @@ public struct OppoLiteConnectApp {
 
         let memMB = MemoryTelemetry.currentFootprintMB()
         print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
-        print("=== 全部自检通过 (v1.1.0) ===")
+        print("=== 全部自检通过 (v1.1.1) ===")
     }
 }
 
-/// Handles Dock icon clicks (`applicationShouldHandleReopen`) and hides the main window cleanly on red `x` click
-/// so clicking the Dock icon always reopens the main window immediately.
+/// Handles Dock icon clicks (`applicationShouldHandleReopen`), cleans up daemon on exit (`applicationWillTerminate`),
+/// and hides the main window cleanly on red `x` click so clicking the Dock icon always reopens the main window immediately.
 public final class ColorDropAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     public static let shared = ColorDropAppDelegate()
     public weak var mainWindow: NSWindow?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.appearance = NSAppearance(named: .aqua)
+    }
+
+    public func applicationWillTerminate(_ notification: Notification) {
+        ScreenMirrorService.shared.stopAllCastOnDisconnect()
+        DspIPCClient.shared.terminateDaemonOnAppQuit()
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

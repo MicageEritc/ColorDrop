@@ -88,12 +88,13 @@ public final class ConnectCoordinator: ObservableObject {
     @Published public var blockedNonSMSCount: Int = 0
     @Published public var lastCopiedCode: String?
 
-    // Telemetry & Performance Metrics
+    // Telemetry, Diagnostic Logs & Performance Metrics
     @Published public var memoryFootprintMB: Double = 18.0
     @Published public var statusBanner: String = "正在同一 Wi-Fi 下自动搜索手机..."
     @Published public var isFFILoaded: Bool = false
     @Published public var isDaemonConnected: Bool = false
     @Published public var lastDirectoryLoadMs: Int?
+    @Published public var diagnosticLogCount: Int = 0
 
     // UI Navigation & Interaction State
     @Published public var selectedTab: NavigationTab = .connect {
@@ -185,12 +186,14 @@ public final class ConnectCoordinator: ObservableObject {
     private let dspClient = DspIPCClient.shared
     private let oshare = OShareEngine.shared
     private let smsService = SMSNotificationService.shared
+    private let logger = DiagnosticLogService.shared
     private var memoryTimer: Timer?
     private var clipboardMonitorTimer: Timer?
     private var lastObservedPasteboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastSelfWrittenPasteboardChangeCount: Int = -1
     private var lastSyncedClipboardText: String = ""
     private var isDaemonInitialized = false
+    private var isRecoveringDaemon = false
     private var lastAutoConnectAttemptByDevice: [String: Date] = [:]
     private var lastHandshakeTime: Date = .distantPast
     private var directoryRequestStartTime: Date?
@@ -206,6 +209,7 @@ public final class ConnectCoordinator: ObservableObject {
     private var lastReceivedPhonePacketAt: Date = Date()
     private var consecutiveICMPFailures: Int = 0
     private var consecutiveDaemonDisconnectChecks: Int = 0
+    private var consecutiveDiscoveryHealthFailures: Int = 0
     private var periodicTimerTickCount: Int = 0
 
     // Persistent Pairing & Auto-Reconnect State
@@ -237,6 +241,7 @@ public final class ConnectCoordinator: ObservableObject {
         self.receiveDirectoryPath = oshare.receiveDirectory.path
         loadPairedDeviceHistory()
         loadMessageHistory()
+        smsService.seedExistingHistory(smsMessages)
         loadClipboardHistory()
         seedRecentDeviceAndBatteryStateFromDaemonLog()
 
@@ -245,6 +250,7 @@ public final class ConnectCoordinator: ObservableObject {
         self.isFFILoaded = oshare.isFFILoaded
         self.isDaemonConnected = dspClient.isDaemonAvailable
         self.memoryFootprintMB = MemoryTelemetry.currentFootprintMB()
+        self.diagnosticLogCount = logger.entryCount
         self.qrCodePayload = DspIPCClient.buildFormattedQRCodeUrl(
             fromRawDaemonJson: nil,
             localIP: discovery.localIPv4,
@@ -252,6 +258,7 @@ public final class ConnectCoordinator: ObservableObject {
             deviceId: discovery.localDeviceId
         )
 
+        logger.log("ColorDrop v1.1.1 启动完成 | 本机IP: \(localIP) | Wi-Fi: \(currentSSID) | 已保存配对设备数: \(pairedDeviceIds.count) | 手动断开标记: \(userManuallyDisconnected)", category: "Lifecycle")
         setupCallbacks()
         startServices()
     }
@@ -426,7 +433,7 @@ public final class ConnectCoordinator: ObservableObject {
             connectedDevice?.osVersionName = osName
             if !resolution.isEmpty { connectedDevice?.screenResolution = resolution }
             let modelSuffix = model.isEmpty ? "" : " · \(model)"
-            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.1.0"
+            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.1.1"
         }
     }
 
@@ -703,18 +710,26 @@ public final class ConnectCoordinator: ObservableObject {
                 if self.selectedTab == .sms {
                     incoming.isRead = true
                 }
-                if let idx = self.smsMessages.firstIndex(where: { $0.id == incoming.id }) {
-                    incoming.isRead = self.smsMessages[idx].isRead || (self.selectedTab == .sms)
+                if let idx = self.smsMessages.firstIndex(where: {
+                    $0.id == incoming.id || ($0.senderTitle == incoming.senderTitle && $0.content == incoming.content && abs($0.receivedAt.timeIntervalSince(incoming.receivedAt)) < 3600)
+                }) {
+                    let existing = self.smsMessages[idx]
+                    incoming.isRead = existing.isRead || (self.selectedTab == .sms)
+                    // Keep the earlier/original phone timestamp so reconnect replays never shift the timeline!
+                    if existing.receivedAt < incoming.receivedAt {
+                        incoming.receivedAt = existing.receivedAt
+                    }
                     self.smsMessages[idx] = incoming
                 } else {
-                    self.smsMessages.insert(incoming, at: 0)
+                    self.smsMessages.append(incoming)
+                    if let code = incoming.verificationCode, !code.isEmpty {
+                        self.lastCopiedCode = code
+                        self.statusBanner = "收到验证码 \(code)"
+                    } else {
+                        self.statusBanner = "收到来自 \(incoming.senderTitle) 的通知"
+                    }
                 }
-                if let code = incoming.verificationCode, !code.isEmpty {
-                    self.lastCopiedCode = code
-                    self.statusBanner = "收到验证码 \(code)"
-                } else {
-                    self.statusBanner = "收到来自 \(incoming.senderTitle) 的通知"
-                }
+                self.smsMessages.sort { $0.receivedAt > $1.receivedAt }
             }
         }
 
@@ -738,6 +753,7 @@ public final class ConnectCoordinator: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isScreenMirroring = isActive
+                self.logger.log("手机镜像状态变更: isActive=\(isActive), msg=\(msg)", category: "Mirror")
                 if !msg.isEmpty {
                     self.statusBanner = msg
                 }
@@ -754,6 +770,12 @@ public final class ConnectCoordinator: ObservableObject {
         smsService.onBlockedCountChanged = { [weak self] count in
             Task { @MainActor [weak self] in
                 self?.blockedNonSMSCount = count
+            }
+        }
+
+        logger.onLogCountChanged = { [weak self] count in
+            Task { @MainActor [weak self] in
+                self?.diagnosticLogCount = count
             }
         }
     }
@@ -1559,6 +1581,7 @@ public final class ConnectCoordinator: ObservableObject {
                     } else {
                         self.consecutiveDaemonDisconnectChecks += 1
                         if self.consecutiveDaemonDisconnectChecks >= 2 {
+                            self.logger.log("连续 2 次查询远端设备未连接，判定手机已断开", level: "WARN", category: "Connect")
                             self.handlePeerDisconnected(byUser: false)
                             return
                         }
@@ -1576,6 +1599,7 @@ public final class ConnectCoordinator: ObservableObject {
                                 self.consecutiveICMPFailures += 1
                                 let silenceSeconds = Date().timeIntervalSince(self.lastReceivedPhonePacketAt)
                                 if self.consecutiveICMPFailures >= 3 && silenceSeconds > 8.0 {
+                                    self.logger.log("手机 \(ip) 连续 3 次 ICMP 超时且无数据包 (\(Int(silenceSeconds))s)，主动清理断链状态", level: "WARN", category: "Connect")
                                     self.forceDisconnectWhenPhoneWiFiOff()
                                 }
                             }
@@ -1584,6 +1608,31 @@ public final class ConnectCoordinator: ObservableObject {
                 } else {
                     guard Date() >= self.connectingLockUntil else { return }
                     await self.pollDspDaemonDevice()
+                    if self.connectedDevice != nil { return }
+
+                    // Every 6 seconds (2 ticks) while disconnected: call `/discovery_query?scope=1&params={"is":1}`
+                    // 1) Flushes daemon's `publish_on_agent_found_no_repeatedly` filter so a phone returning to Wi-Fi immediately fires `onAgentFound`
+                    // 2) Detects zombie daemon (`404 · 02-005-001: No socket is alive.`) and automatically restarts `O+Connect Service`
+                    if self.periodicTimerTickCount % 2 == 0 && self.dspClient.isDaemonAvailable && !self.isRecoveringDaemon {
+                        let health = await self.dspClient.probeDevicesAndCheckHealth()
+                        if !health.healthy {
+                            self.consecutiveDiscoveryHealthFailures += 1
+                            let reason = health.reason ?? "discovery_query 失败"
+                            if reason.contains("02-005-001") || reason.contains("No socket is alive") || self.consecutiveDiscoveryHealthFailures >= 2 {
+                                await self.recoverZombieDaemon(reason: reason)
+                                return
+                            }
+                        } else {
+                            self.consecutiveDiscoveryHealthFailures = 0
+                        }
+                    }
+
+                    // Every 9 seconds (3 ticks) while disconnected: actively ping known paired phone IPs on the same Wi-Fi
+                    if self.periodicTimerTickCount % 3 == 0 {
+                        self.discovery.triggerImmediateScan()
+                        await self.probeKnownPairedPhonesOnLAN()
+                    }
+
                     if self.connectedDevice == nil,
                        !self.userManuallyDisconnected,
                        let candidate = self.discoveredDevices.first(where: { self.shouldAutoConnect(to: $0) }) {
@@ -1599,10 +1648,45 @@ public final class ConnectCoordinator: ObservableObject {
         }
     }
 
+    /// Self-heals a zombie `O+Connect Service` whose discovery subsystem died (`02-005-001: No socket is alive.`).
+    private func recoverZombieDaemon(reason: String) async {
+        guard !isRecoveringDaemon else { return }
+        isRecoveringDaemon = true
+        defer { isRecoveringDaemon = false }
+
+        consecutiveDiscoveryHealthFailures = 0
+        isDaemonInitialized = false
+        logger.log("检测到守护进程发现子系统假死 (\(reason))，正在杀掉旧守护进程并重启自愈...", level: "WARN", category: "Watchdog")
+        await dspClient.forceRestartDaemon(reason: reason)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        await initializeDaemonIfPresent()
+        discovery.triggerImmediateScan()
+        logger.log("守护进程自愈重启并重新初始化完成", category: "Watchdog")
+    }
+
+    /// Actively pings previously paired phone IPs on the current subnet so returning phones are discovered even before multicast arrives.
+    private func probeKnownPairedPhonesOnLAN() async {
+        let localPrefix = localIP.split(separator: ".").prefix(3).joined(separator: ".")
+        guard !localPrefix.isEmpty, localPrefix != "127.0.0" else { return }
+
+        for (ip, devId) in knownDeviceIdByIP where ip.hasPrefix(localPrefix + ".") && !discovery.isSelfAddress(ip) {
+            let knownName = knownDeviceNameById[devId] ?? knownDeviceNameByIP[ip]
+            discovery.probeDirectPeer(ip: ip, port: 10152, knownName: knownName) { [weak self] dev in
+                guard let self, let dev = dev else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let enriched = self.enrichDeviceWithKnownMetadata(dev)
+                    self.upsertDiscoveredDevice(enriched)
+                    await self.attemptAutoReconnectIfEligible(enriched)
+                }
+            }
+        }
+    }
+
     private func forceDisconnectWhenPhoneWiFiOff() {
         consecutiveICMPFailures = 0
         consecutiveDaemonDisconnectChecks = 0
-        connectingLockUntil = Date().addingTimeInterval(4.0)
+        connectingLockUntil = Date().addingTimeInterval(3.0)
         let currentType = connectedDevice?.connectType ?? 16
         let lostId = connectedDevice?.deviceId ?? ""
         if !lostId.isEmpty {
@@ -1636,7 +1720,13 @@ public final class ConnectCoordinator: ObservableObject {
         await dspClient.updateScreenUnlockState()
         await dspClient.enableSenselessDiscovery(true)
         _ = try? await dspClient.setDiscoveryActive(true)
-        await dspClient.probeDevices()
+        let health = await dspClient.probeDevicesAndCheckHealth()
+        if !health.healthy, !isRecoveringDaemon {
+            let reason = health.reason ?? "启动自检发现通道异常"
+            logger.log("初始化时检测到旧守护进程发现通道失活 (\(reason))，立即重启守护进程", level: "WARN", category: "Daemon")
+            await recoverZombieDaemon(reason: reason)
+            return
+        }
         await dspClient.createAgent()
 
         self.qrCodePayload = await dspClient.fetchQrCodeInfo(
@@ -1899,6 +1989,7 @@ public final class ConnectCoordinator: ObservableObject {
     }
 
     private func handlePeerDisconnected(byUser: Bool) {
+        let prevName = connectedDevice?.deviceName ?? "手机"
         connectedDevice = nil
         activeIncomingCall = nil
         if isScreenMirroring || screenMirrorService.isMirroringActive {
@@ -1907,11 +1998,27 @@ public final class ConnectCoordinator: ObservableObject {
         }
         consecutiveICMPFailures = 0
         consecutiveDaemonDisconnectChecks = 0
+        if !byUser {
+            // Reset auto-connect cooldown so as soon as the phone rejoins Wi-Fi it reconnects immediately!
+            lastAutoConnectAttemptByDevice.removeAll()
+        }
         connectionState = byUser ? .disconnected : .scanning
         remoteFiles = []
         selectedFileIds.removeAll()
         isLoadingFiles = false
         statusBanner = byUser ? "已手动断开连接" : "手机已断开或离开当前 Wi-Fi，恢复后将自动重连"
+        logger.log("设备连接已断开 (\(prevName), byUser=\(byUser))", category: "Connect")
+
+        if !byUser {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard let self, self.connectedDevice == nil else { return }
+                let health = await self.dspClient.probeDevicesAndCheckHealth()
+                if !health.healthy {
+                    await self.recoverZombieDaemon(reason: health.reason ?? "断连后发现通道失活")
+                }
+            }
+        }
     }
 
     // MARK: - On-Demand Phone File Manager Browsing, Delete & Download Feedback
@@ -2435,8 +2542,51 @@ public final class ConnectCoordinator: ObservableObject {
         activeIncomingCall = nil
         smsService.removeDeliveredCallBanner(callId: callId)
         statusBanner = "已挂断 \(title) 的来电"
+        logger.log("用户在 Mac 端点击挂断来电: \(title) (callId=\(callId))", category: "Call")
         Task {
             await dspClient.hangupIncomingCall(callId: callId, phoneNumber: number)
         }
+    }
+
+    // MARK: - Diagnostic Log Export & Management (`设置`)
+
+    public func exportDiagnosticLogs() {
+        let stateSummary: [String: String] = [
+            "01_软件版本": "ColorDrop v1.1.1",
+            "02_连接状态": connectionState.rawValue,
+            "03_当前Wi-Fi": currentSSID,
+            "04_本机局域网IP": localIP,
+            "05_已连接设备": connectedDevice.map { "\($0.deviceName) (\($0.deviceId), IP: \($0.lanIP))" } ?? "未连接",
+            "06_附近已发现设备": discoveredDevices.map { "\($0.deviceName) (\($0.deviceId), IP: \($0.lanIP), paired=\($0.isPaired))" }.joined(separator: "; "),
+            "07_历史配对设备ID": Array(pairedDeviceIds).joined(separator: ", "),
+            "08_上次连接设备ID": lastConnectedDeviceId,
+            "09_手动断开标志(UserManuallyDisconnected)": String(userManuallyDisconnected),
+            "10_守护进程在线(isDaemonConnected)": String(dspClient.isDaemonAvailable),
+            "11_FFI传输库加载(isFFILoaded)": String(isFFILoaded),
+            "12_物理内存占用": String(format: "%.2f MB", memoryFootprintMB)
+        ]
+        let reportText = logger.buildDiagnosticReport(stateSummary: stateSummary)
+
+        let panel = NSSavePanel()
+        panel.title = "导出 ColorDrop 诊断日志"
+        panel.prompt = "导出"
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd-HHmmss"
+        panel.nameFieldStringValue = "ColorDrop-Diagnostic-\(df.string(from: Date())).log"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try reportText.write(to: url, atomically: true, encoding: .utf8)
+                statusBanner = "诊断日志已导出至：\(url.lastPathComponent)"
+            } catch {
+                statusBanner = "导出日志失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    public func clearDiagnosticLogs() {
+        logger.clearLogs()
+        diagnosticLogCount = logger.entryCount
+        statusBanner = "已清空运行日志记录"
     }
 }

@@ -1623,7 +1623,7 @@ public struct MainConnectView: View {
                 Text("设置")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Text("ColorDrop v1.1.0")
+                Text("ColorDrop v1.1.1")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1742,6 +1742,56 @@ public struct MainConnectView: View {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .stroke(Color.primary.opacity(0.15), lineWidth: 1)
                         )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            Divider().opacity(0.45)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("运行日志与问题诊断")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("已记录 \(coordinator.diagnosticLogCount) 条核心事件与守护进程诊断摘要，遇到连接或同步异常时可一键导出日志文件")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+
+                Button {
+                    coordinator.clearDiagnosticLogs()
+                } label: {
+                    Text("清空日志")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    coordinator.exportDiagnosticLogs()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("导出日志...")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(red: 0.08, green: 0.09, blue: 0.12))
+                    )
                 }
                 .buttonStyle(.plain)
             }
