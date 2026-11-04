@@ -404,7 +404,7 @@ public final class ConnectCoordinator: ObservableObject {
             connectedDevice?.osVersionName = osName
             if !resolution.isEmpty { connectedDevice?.screenResolution = resolution }
             let modelSuffix = model.isEmpty ? "" : " · \(model)"
-            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.0.2"
+            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.0.3"
         }
     }
 
@@ -1457,7 +1457,10 @@ public final class ConnectCoordinator: ObservableObject {
                 }
                 let daemonReady = self.dspClient.isDaemonAvailable
                 self.isDaemonConnected = daemonReady
-                if daemonReady && !self.isDaemonInitialized {
+                if !daemonReady {
+                    self.isDaemonInitialized = false
+                    self.dspClient.ensureCoreDaemonRunning()
+                } else if !self.isDaemonInitialized {
                     await self.initializeDaemonIfPresent()
                 }
 
@@ -1532,12 +1535,15 @@ public final class ConnectCoordinator: ObservableObject {
     private func initializeDaemonIfPresent() async {
         guard dspClient.isDaemonAvailable else { return }
         isDaemonConnected = true
-        isDaemonInitialized = true
 
         dspClient.startEventSubscriptionsIfNeeded()
         try? await Task.sleep(nanoseconds: 250_000_000)
 
-        _ = try? await dspClient.initializeCore()
+        guard (try? await dspClient.initializeCore()) != nil else {
+            isDaemonInitialized = false
+            return
+        }
+        isDaemonInitialized = true
         try? await Task.sleep(nanoseconds: 350_000_000)
 
         if let daemonDevId = await dspClient.getLocalDeviceIdFromDaemon() {

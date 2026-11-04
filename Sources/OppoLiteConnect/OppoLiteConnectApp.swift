@@ -19,7 +19,7 @@ public struct OppoLiteConnectApp {
     }
 
     private static func runSelfTest() {
-        print("=== ColorDrop v1.0.2 原生自检 ===")
+        print("=== ColorDrop v1.0.3 原生自检 ===")
         let discovery = LanSdpDiscovery()
         print("1. 本地设备 ID: \(discovery.localDeviceId) | 局域网 IP: \(discovery.localIPv4) | 本机IP过滤校验: \(discovery.isSelfAddress(discovery.localIPv4))")
         assert(discovery.isSelfAddress(discovery.localIPv4), "Must filter out Mac's own IP address")
@@ -103,7 +103,7 @@ public struct OppoLiteConnectApp {
 
         let memMB = MemoryTelemetry.currentFootprintMB()
         print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
-        print("=== 全部自检通过 (v1.0.2) ===")
+        print("=== 全部自检通过 (v1.0.3) ===")
     }
 }
 
@@ -161,12 +161,10 @@ public struct ColorDropGUIApp: App {
     public init() {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.appearance = NSAppearance(named: .aqua)
-        Self.applyCustomIconIfAvailable()
     }
 
-    /// Loads `Vendor/iconbase_192.png` (or bundled `AppIcon.png`),
-    /// normalizes it to Apple's macOS HIG squircle grid (`824/1024`), sets the Dock icon,
-    /// and updates `AppIcon.icns`.
+    /// Generates `AppIcon.icns` and `AppIcon.png` ONLY during build (`--sync-icon-only`)
+    /// from the raw `Vendor/iconbase_192.png` source so the icon is never shrunk a second time at runtime!
     public static func applyCustomIconIfAvailable() {
         let cwd = FileManager.default.currentDirectoryPath
         let execURL = URL(fileURLWithPath: CommandLine.arguments.first ?? Bundle.main.executablePath ?? "")
@@ -176,20 +174,15 @@ public struct ColorDropGUIApp: App {
             .appendingPathComponent("Resources")
             .path
 
-        let candidatePaths: [String] = [
+        // NEVER include `AppIcon.png` here — only use the unpadded raw `iconbase_192.png` source!
+        let rawSourcePaths: [String] = [
             "\(cwd)/Vendor/iconbase_192.png",
-            "\(inferredBundleResDir)/AppIcon.png",
-            Bundle.main.bundlePath + "/Contents/Resources/AppIcon.png"
+            "\(inferredBundleResDir)/Vendor/iconbase_192.png",
+            Bundle.main.bundlePath + "/Contents/Resources/Vendor/iconbase_192.png"
         ]
 
-        for path in candidatePaths where FileManager.default.fileExists(atPath: path) {
+        for path in rawSourcePaths where FileManager.default.fileExists(atPath: path) {
             if let normalizedPng = Self.renderMacOSHIGIconPNG(fromPath: path, canvasSize: 1024) {
-                if !CommandLine.arguments.contains("--sync-icon-only"),
-                   let nsImage = NSImage(data: normalizedPng) {
-                    nsImage.size = NSSize(width: 512, height: 512)
-                    NSApplication.shared.applicationIconImage = nsImage
-                }
-
                 let targetResDirs = Set([
                     inferredBundleResDir,
                     Bundle.main.bundlePath + "/Contents/Resources"

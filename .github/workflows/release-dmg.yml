@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 1.0.2)"
+        description: "Release version (e.g. 1.0.3)"
         required: false
-        default: "1.0.2"
+        default: "1.0.3"
 
 permissions:
   contents: write
@@ -28,7 +28,7 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             RAW_TAG="${{ github.event.release.tag_name }}"
           else
-            RAW_TAG="v${{ inputs.version || '1.0.2' }}"
+            RAW_TAG="v${{ inputs.version || '1.0.3' }}"
           fi
           CLEAN_VER="${RAW_TAG#v}"
           echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
