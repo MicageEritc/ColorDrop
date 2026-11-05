@@ -35,6 +35,8 @@ public final class ConnectCoordinator: ObservableObject {
     @Published public var autoConnectOnSameWiFi: Bool = true
     @Published public var discoveredDevices: [OppoDevice] = []
     @Published public var connectedDevice: OppoDevice?
+    @Published public var ignoredDeviceIds: Set<String> = []
+    @Published public var ignoredDeviceIPs: Set<String> = []
     @Published public var qrCodePayload: String = ""
 
     // Remote File Manager (Loaded strictly on-demand)
@@ -219,6 +221,8 @@ public final class ConnectCoordinator: ObservableObject {
     private let pairedIdsByIPDefaultsKey = "OppoLite.PairedDeviceIdsByIP"
     private let lastConnectedIdDefaultsKey = "ColorDrop.LastConnectedDeviceId"
     private let manualDisconnectDefaultsKey = "ColorDrop.UserManuallyDisconnected"
+    private let ignoredIdsDefaultsKey = "ColorDrop.IgnoredDeviceIds"
+    private let ignoredIPsDefaultsKey = "ColorDrop.IgnoredDeviceIPs"
     private let messageHistoryFilePath = "/tmp/oppolite-oppodat/message_history.json"
     private let clipboardHistoryFilePath = "/tmp/oppolite-oppodat/clipboard_history.json"
 
@@ -307,8 +311,62 @@ public final class ConnectCoordinator: ObservableObject {
         if let savedNamesById = UserDefaults.standard.dictionary(forKey: pairedNamesByIdDefaultsKey) as? [String: String] {
             for (k, v) in savedNamesById { knownDeviceNameById[k] = v }
         }
+        if let savedIgnoredIds = UserDefaults.standard.stringArray(forKey: ignoredIdsDefaultsKey) {
+            ignoredDeviceIds.formUnion(savedIgnoredIds)
+        }
+        if let savedIgnoredIPs = UserDefaults.standard.stringArray(forKey: ignoredIPsDefaultsKey) {
+            ignoredDeviceIPs.formUnion(savedIgnoredIPs)
+        }
         self.lastConnectedDeviceId = UserDefaults.standard.string(forKey: lastConnectedIdDefaultsKey) ?? ""
         self.userManuallyDisconnected = UserDefaults.standard.bool(forKey: manualDisconnectDefaultsKey)
+    }
+
+    public func isDeviceIgnored(_ device: OppoDevice) -> Bool {
+        isDeviceIgnored(deviceId: device.deviceId, ip: device.lanIP)
+    }
+
+    public func isDeviceIgnored(deviceId: String, ip: String) -> Bool {
+        if !deviceId.isEmpty && ignoredDeviceIds.contains(deviceId) {
+            return true
+        }
+        if !ip.isEmpty && ignoredDeviceIPs.contains(ip) {
+            return true
+        }
+        if !ip.isEmpty, let mappedId = knownDeviceIdByIP[ip], ignoredDeviceIds.contains(mappedId) {
+            return true
+        }
+        return false
+    }
+
+    public func toggleIgnoreDevice(_ device: OppoDevice) {
+        let cleanIP = (device.lanIP == "同局域网") ? "" : device.lanIP
+        if isDeviceIgnored(device) {
+            ignoredDeviceIds.remove(device.deviceId)
+            if !cleanIP.isEmpty {
+                ignoredDeviceIPs.remove(cleanIP)
+                if let mappedId = knownDeviceIdByIP[cleanIP] {
+                    ignoredDeviceIds.remove(mappedId)
+                }
+            }
+            UserDefaults.standard.set(Array(ignoredDeviceIds), forKey: ignoredIdsDefaultsKey)
+            UserDefaults.standard.set(Array(ignoredDeviceIPs), forKey: ignoredIPsDefaultsKey)
+            statusBanner = "已取消忽略 \(device.deviceName)，现在可以正常连接"
+            logger.log("取消忽略设备: \(device.deviceName) (\(device.deviceId), IP: \(device.lanIP))", category: "Device")
+        } else {
+            if !device.deviceId.isEmpty {
+                ignoredDeviceIds.insert(device.deviceId)
+            }
+            if !cleanIP.isEmpty {
+                ignoredDeviceIPs.insert(cleanIP)
+                if let mappedId = knownDeviceIdByIP[cleanIP], !mappedId.isEmpty {
+                    ignoredDeviceIds.insert(mappedId)
+                }
+            }
+            UserDefaults.standard.set(Array(ignoredDeviceIds), forKey: ignoredIdsDefaultsKey)
+            UserDefaults.standard.set(Array(ignoredDeviceIPs), forKey: ignoredIPsDefaultsKey)
+            statusBanner = "已忽略 \(device.deviceName)，将不再响应其弹窗或自动连接"
+            logger.log("已忽略设备: \(device.deviceName) (\(device.deviceId), IP: \(device.lanIP))", category: "Device")
+        }
     }
 
     private func rememberPairedDevice(_ device: OppoDevice) {
@@ -470,6 +528,7 @@ public final class ConnectCoordinator: ObservableObject {
 
     private func shouldAutoConnect(to device: OppoDevice) -> Bool {
         guard autoConnectOnSameWiFi && !userManuallyDisconnected else { return false }
+        guard !isDeviceIgnored(device) else { return false }
         if !lastConnectedDeviceId.isEmpty && device.deviceId == lastConnectedDeviceId {
             return true
         }
@@ -1062,7 +1121,16 @@ public final class ConnectCoordinator: ObservableObject {
                 ?? (dataDict["connect_address"] as? String)
                 ?? (dataDict["scp_address"] as? String)
                 ?? ""
+            let unmasked = DspIPCClient.unmaskDaemonIP(deviceAddress, localIP: localIP)
+            let ip = unmasked.split(separator: ":").first.map(String.init) ?? ""
             let deviceName = (dataDict["device_name"] as? String) ?? "手机"
+
+            if isDeviceIgnored(deviceId: deviceId, ip: ip) {
+                logger.log("已拦截被忽略设备的连接请求: \(deviceName) (\(deviceId), IP: \(ip))", category: "Connect")
+                _ = try? await dspClient.stopConnection(connectType: connectType == 0 ? 16 : connectType)
+                return
+            }
+
             connectingLockUntil = Date().addingTimeInterval(25.0)
             statusBanner = "收到 \(deviceName) 的连接请求，正在自动接受..."
             await dspClient.acceptConnection(deviceId: deviceId, connectType: connectType, deviceAddress: deviceAddress)

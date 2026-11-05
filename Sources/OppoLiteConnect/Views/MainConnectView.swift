@@ -5,11 +5,18 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 
 /// Permanently removes the macOS titlebar separator line and any `NSScrollPocket` / `_NSTitlebarDecorationView` border
-/// using KVO observation, empty CAShapeLayer masking, and mouse-hover tracking.
+/// even when dragging or moving the window.
 public final class TitlebarObserverView: NSView {
     private var styleObservation: NSKeyValueObservation?
+    private var windowObservers: [NSObjectProtocol] = []
     private weak var observedWindow: NSWindow?
     private var pendingCleanScheduled = false
+
+    deinit {
+        for obs in windowObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
+    }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -19,7 +26,12 @@ public final class TitlebarObserverView: NSView {
 
     public override func layout() {
         super.layout()
-        // Never mutate window.styleMask or subview visibility synchronously inside AppKit's layout() pass!
+        if let win = window {
+            if win.titlebarSeparatorStyle != .none {
+                win.titlebarSeparatorStyle = .none
+            }
+            WindowTitlebarCleaner.maskDecorationLayersOnly(in: win)
+        }
         scheduleCleanWindow()
     }
 
@@ -40,12 +52,38 @@ public final class TitlebarObserverView: NSView {
         guard observedWindow !== win else { return }
         observedWindow = win
 
+        for obs in windowObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        windowObservers.removeAll()
+
         styleObservation = win.observe(\.titlebarSeparatorStyle, options: [.new, .initial]) { [weak self, weak win] _, _ in
             guard let win else { return }
             if win.titlebarSeparatorStyle != .none {
                 win.titlebarSeparatorStyle = .none
             }
+            WindowTitlebarCleaner.maskDecorationLayersOnly(in: win)
             self?.scheduleCleanWindow()
+        }
+
+        let names: [Notification.Name] = [
+            NSWindow.willMoveNotification,
+            NSWindow.didMoveNotification,
+            NSWindow.didResizeNotification,
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didResignKeyNotification,
+            NSWindow.didUpdateNotification
+        ]
+        for name in names {
+            let token = NotificationCenter.default.addObserver(forName: name, object: win, queue: .main) { [weak self, weak win] _ in
+                guard let win else { return }
+                if win.titlebarSeparatorStyle != .none {
+                    win.titlebarSeparatorStyle = .none
+                }
+                WindowTitlebarCleaner.maskDecorationLayersOnly(in: win)
+                self?.scheduleCleanWindow()
+            }
+            windowObservers.append(token)
         }
     }
 }
@@ -99,6 +137,38 @@ public struct WindowTitlebarCleaner: NSViewRepresentable {
         hideTitlebarDecorationViews(in: window)
     }
 
+    /// Safe synchronous layer-only pass during window drag/update that never triggers AppKit layout recursion.
+    public static func maskDecorationLayersOnly(in window: NSWindow) {
+        guard let root = window.contentView?.superview else { return }
+        maskLayerTree(root)
+    }
+
+    private static func maskLayerTree(_ view: NSView) {
+        let typeName = String(describing: type(of: view))
+        if typeName.contains("TitlebarDecoration")
+            || typeName.contains("TitlebarSeparator")
+            || typeName.contains("ScrollPocket")
+            || typeName.contains("Pocket")
+            || typeName.contains("SectionHeader") {
+            view.alphaValue = 0.0
+            view.layer?.opacity = 0.0
+            view.layer?.mask = CAShapeLayer()
+            view.layer?.sublayers?.forEach { $0.opacity = 0.0 }
+        }
+        if typeName.contains("Titlebar") {
+            view.layer?.borderWidth = 0
+            view.layer?.shadowOpacity = 0
+            view.layer?.sublayers?.forEach { sublayer in
+                if sublayer.bounds.height > 0 && sublayer.bounds.height <= 2.0 {
+                    sublayer.opacity = 0.0
+                }
+            }
+        }
+        for sub in view.subviews {
+            maskLayerTree(sub)
+        }
+    }
+
     public static func hideTitlebarDecorationViews(in window: NSWindow) {
         guard let root = window.contentView?.superview else { return }
         cleanSubviewTree(root)
@@ -116,6 +186,16 @@ public struct WindowTitlebarCleaner: NSViewRepresentable {
             view.wantsLayer = true
             view.layer?.opacity = 0.0
             view.layer?.mask = CAShapeLayer()
+            view.layer?.sublayers?.forEach { $0.opacity = 0.0 }
+        }
+        if typeName.contains("Titlebar") {
+            view.layer?.borderWidth = 0
+            view.layer?.shadowOpacity = 0
+            view.layer?.sublayers?.forEach { sublayer in
+                if sublayer.bounds.height > 0 && sublayer.bounds.height <= 2.0 {
+                    sublayer.opacity = 0.0
+                }
+            }
         }
         if let effectView = view as? NSVisualEffectView,
            let superName = view.superview.map({ String(describing: type(of: $0)) }),
@@ -158,7 +238,9 @@ public struct MainConnectView: View {
                 .ignoresSafeArea(.container, edges: .vertical)
 
             mainContentPanel
+                .ignoresSafeArea(.container, edges: .vertical)
         }
+        .ignoresSafeArea(.container, edges: .vertical)
         .tint(.blue)
         .environment(\.colorScheme, .light)
         .frame(minWidth: 760, minHeight: 480)
@@ -196,10 +278,10 @@ public struct MainConnectView: View {
 
     private var mainContentPanel: some View {
         VStack(spacing: 0) {
-            // Fixed non-scrolling top spacer so ScrollView NEVER touches the titlebar boundary
+            // Full 28pt top titlebar spacer matching sidebarView so ScrollView never attaches to the titlebar safe area
             Rectangle()
                 .fill(Color.white)
-                .frame(height: 2)
+                .frame(height: 28)
 
             if let activeCall = coordinator.activeIncomingCall {
                 incomingCallTopBanner(activeCall)
@@ -502,6 +584,7 @@ public struct MainConnectView: View {
                     Divider().opacity(0.45)
 
                     ForEach(Array(nearby.enumerated()), id: \.element.id) { idx, device in
+                        let isIgnored = coordinator.isDeviceIgnored(device)
                         if idx > 0 {
                             Divider().opacity(0.45).padding(.leading, 20)
                         }
@@ -510,6 +593,7 @@ public struct MainConnectView: View {
                                 HStack(spacing: 6) {
                                     Text(device.deviceName)
                                         .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(isIgnored ? .secondary : .primary)
                                     if device.isPaired {
                                         Text("曾连接")
                                             .font(.system(size: 10, weight: .medium))
@@ -520,25 +604,65 @@ public struct MainConnectView: View {
                                             .clipShape(Capsule())
                                     }
                                 }
-                                Text("\(device.lanIP) · 可连接")
+                                Text(isIgnored ? "\(device.lanIP) · 已忽略" : "\(device.lanIP) · 可连接")
                                     .font(.system(size: 12))
                                     .foregroundStyle(.secondary)
                             }
 
                             Spacer()
 
-                            Button {
-                                Task { await coordinator.connect(to: device) }
-                            } label: {
-                                Text("连接")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(Color(red: 0.08, green: 0.09, blue: 0.12))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            if isIgnored {
+                                Button {
+                                    coordinator.toggleIgnoreDevice(device)
+                                } label: {
+                                    Text("已忽略")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 6)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .fill(Color.primary.opacity(0.05))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                        .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                                                )
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .help("点击取消忽略，恢复连接按钮")
+                            } else {
+                                HStack(spacing: 8) {
+                                    Button {
+                                        coordinator.toggleIgnoreDevice(device)
+                                    } label: {
+                                        Text("忽略")
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                    .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("忽略该设备，防止其自动弹窗或自动连接")
+
+                                    Button {
+                                        Task { await coordinator.connect(to: device) }
+                                    } label: {
+                                        Text("连接")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 6)
+                                            .background(Color(red: 0.08, green: 0.09, blue: 0.12))
+                                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
                         .padding(.horizontal, 20)
                         .padding(.vertical, 14)
