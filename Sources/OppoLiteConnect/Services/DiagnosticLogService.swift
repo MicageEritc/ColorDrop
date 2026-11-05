@@ -86,7 +86,7 @@ public final class DiagnosticLogService: @unchecked Sendable {
         recentEntries.removeAll()
         lock.unlock()
         try? FileManager.default.removeItem(atPath: logFilePath)
-        log("用户已清空运行日志 (ColorDrop v1.1.1)", category: "System")
+        log("用户已清空运行日志 (ColorDrop v1.1.2)", category: "System")
     }
 
     /// Builds a comprehensive diagnostic report combining ColorDrop state, app logs, and recent daemon logs.
@@ -97,7 +97,7 @@ public final class DiagnosticLogService: @unchecked Sendable {
         fmt.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
 
         sections.append("====================================================")
-        sections.append("ColorDrop v1.1.1 诊断日志报告 (Diagnostic Report)")
+        sections.append("ColorDrop v1.1.2 诊断日志报告 (Diagnostic Report)")
         sections.append("导出时间: \(fmt.string(from: Date()))")
         sections.append("macOS 版本: \(ProcessInfo.processInfo.operatingSystemVersionString)")
         sections.append("====================================================")

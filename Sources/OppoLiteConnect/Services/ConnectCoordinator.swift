@@ -242,6 +242,9 @@ public final class ConnectCoordinator: ObservableObject {
         if UserDefaults.standard.object(forKey: "ColorDrop.FadeExpiredCodes") != nil {
             self.fadeExpiredCodes = UserDefaults.standard.bool(forKey: "ColorDrop.FadeExpiredCodes")
         }
+        if !CommandLine.arguments.contains("--self-test") && !CommandLine.arguments.contains("--sync-icon-only") {
+            dspClient.terminateOtherColorDropProcesses()
+        }
         self.receiveDirectoryPath = oshare.receiveDirectory.path
         loadPairedDeviceHistory()
         loadMessageHistory()
@@ -262,7 +265,7 @@ public final class ConnectCoordinator: ObservableObject {
             deviceId: discovery.localDeviceId
         )
 
-        logger.log("ColorDrop v1.1.1 启动完成 | 本机IP: \(localIP) | Wi-Fi: \(currentSSID) | 已保存配对设备数: \(pairedDeviceIds.count) | 手动断开标记: \(userManuallyDisconnected)", category: "Lifecycle")
+        logger.log("ColorDrop v1.1.2 启动完成 | 本机IP: \(localIP) | Wi-Fi: \(currentSSID) | 已保存配对设备数: \(pairedDeviceIds.count) | 手动断开标记: \(userManuallyDisconnected)", category: "Lifecycle")
         setupCallbacks()
         startServices()
     }
@@ -317,6 +320,10 @@ public final class ConnectCoordinator: ObservableObject {
         if let savedIgnoredIPs = UserDefaults.standard.stringArray(forKey: ignoredIPsDefaultsKey) {
             ignoredDeviceIPs.formUnion(savedIgnoredIPs)
         }
+        let sharedIgnored = dspClient.loadSharedIgnoredDevices()
+        ignoredDeviceIds.formUnion(sharedIgnored.ids)
+        ignoredDeviceIPs.formUnion(sharedIgnored.ips)
+        dspClient.saveSharedIgnoredDevices(ids: ignoredDeviceIds, ips: ignoredDeviceIPs)
         self.lastConnectedDeviceId = UserDefaults.standard.string(forKey: lastConnectedIdDefaultsKey) ?? ""
         self.userManuallyDisconnected = UserDefaults.standard.bool(forKey: manualDisconnectDefaultsKey)
     }
@@ -326,31 +333,46 @@ public final class ConnectCoordinator: ObservableObject {
     }
 
     public func isDeviceIgnored(deviceId: String, ip: String) -> Bool {
+        let unmasked = DspIPCClient.unmaskDaemonIP(ip, localIP: localIP)
+        let cleanIP = (unmasked == "同局域网") ? "" : (unmasked.split(separator: ":").first.map(String.init) ?? unmasked)
         if !deviceId.isEmpty && ignoredDeviceIds.contains(deviceId) {
             return true
         }
-        if !ip.isEmpty && ignoredDeviceIPs.contains(ip) {
+        if !cleanIP.isEmpty && ignoredDeviceIPs.contains(cleanIP) {
             return true
         }
-        if !ip.isEmpty, let mappedId = knownDeviceIdByIP[ip], ignoredDeviceIds.contains(mappedId) {
+        if !cleanIP.isEmpty, let mappedId = knownDeviceIdByIP[cleanIP], ignoredDeviceIds.contains(mappedId) {
             return true
         }
-        return false
+        if !deviceId.isEmpty {
+            let synthetic = LanSdpDiscovery.deterministicDeviceId(forIP: cleanIP)
+            if !cleanIP.isEmpty && ignoredDeviceIds.contains(synthetic) {
+                return true
+            }
+        }
+        return dspClient.isDeviceIgnoredInSharedStore(deviceId: deviceId, ip: cleanIP, localIP: localIP)
     }
 
     public func toggleIgnoreDevice(_ device: OppoDevice) {
-        let cleanIP = (device.lanIP == "同局域网") ? "" : device.lanIP
+        let unmasked = DspIPCClient.unmaskDaemonIP(device.lanIP, localIP: localIP)
+        let cleanIP = (unmasked == "同局域网") ? "" : (unmasked.split(separator: ":").first.map(String.init) ?? unmasked)
         if isDeviceIgnored(device) {
             ignoredDeviceIds.remove(device.deviceId)
             if !cleanIP.isEmpty {
                 ignoredDeviceIPs.remove(cleanIP)
+                ignoredDeviceIds.remove(LanSdpDiscovery.deterministicDeviceId(forIP: cleanIP))
                 if let mappedId = knownDeviceIdByIP[cleanIP] {
                     ignoredDeviceIds.remove(mappedId)
                 }
             }
+            for (ipKey, mappedId) in knownDeviceIdByIP where mappedId == device.deviceId {
+                ignoredDeviceIPs.remove(ipKey)
+            }
             UserDefaults.standard.set(Array(ignoredDeviceIds), forKey: ignoredIdsDefaultsKey)
             UserDefaults.standard.set(Array(ignoredDeviceIPs), forKey: ignoredIPsDefaultsKey)
-            statusBanner = "已取消忽略 \(device.deviceName)，现在可以正常连接"
+            dspClient.saveSharedIgnoredDevices(ids: ignoredDeviceIds, ips: ignoredDeviceIPs)
+            lastAutoConnectAttemptByDevice.removeValue(forKey: device.deviceId)
+            statusBanner = "已取消忽略 \(device.deviceName)，现在可以点击「连接」正常连接"
             logger.log("取消忽略设备: \(device.deviceName) (\(device.deviceId), IP: \(device.lanIP))", category: "Device")
         } else {
             if !device.deviceId.isEmpty {
@@ -358,14 +380,55 @@ public final class ConnectCoordinator: ObservableObject {
             }
             if !cleanIP.isEmpty {
                 ignoredDeviceIPs.insert(cleanIP)
+                ignoredDeviceIds.insert(LanSdpDiscovery.deterministicDeviceId(forIP: cleanIP))
                 if let mappedId = knownDeviceIdByIP[cleanIP], !mappedId.isEmpty {
                     ignoredDeviceIds.insert(mappedId)
                 }
             }
+            for (ipKey, mappedId) in knownDeviceIdByIP where mappedId == device.deviceId {
+                ignoredDeviceIPs.insert(ipKey)
+            }
+            // Also remove from auto-connect pairing history so auto-connect never targets this device while ignored
+            pairedDeviceIds.remove(device.deviceId)
+            if !cleanIP.isEmpty, let mappedId = knownDeviceIdByIP[cleanIP] {
+                pairedDeviceIds.remove(mappedId)
+                if lastConnectedDeviceId == mappedId {
+                    lastConnectedDeviceId = ""
+                }
+            }
+            if lastConnectedDeviceId == device.deviceId {
+                lastConnectedDeviceId = ""
+            }
+            UserDefaults.standard.set(Array(pairedDeviceIds), forKey: pairedIdsDefaultsKey)
+            UserDefaults.standard.set(lastConnectedDeviceId, forKey: lastConnectedIdDefaultsKey)
             UserDefaults.standard.set(Array(ignoredDeviceIds), forKey: ignoredIdsDefaultsKey)
             UserDefaults.standard.set(Array(ignoredDeviceIPs), forKey: ignoredIPsDefaultsKey)
-            statusBanner = "已忽略 \(device.deviceName)，将不再响应其弹窗或自动连接"
-            logger.log("已忽略设备: \(device.deviceName) (\(device.deviceId), IP: \(device.lanIP))", category: "Device")
+            dspClient.saveSharedIgnoredDevices(ids: ignoredDeviceIds, ips: ignoredDeviceIPs)
+            lastAutoConnectAttemptByDevice[device.deviceId] = .distantFuture
+
+            if let idx = discoveredDevices.firstIndex(where: { $0.deviceId == device.deviceId || (!cleanIP.isEmpty && $0.lanIP == cleanIP) }) {
+                discoveredDevices[idx].isPaired = false
+            }
+
+            if connectedDevice?.deviceId == device.deviceId || (!cleanIP.isEmpty && connectedDevice?.lanIP == cleanIP) {
+                handlePeerDisconnected(byUser: true)
+            } else if connectionState == .connecting {
+                connectingLockUntil = .distantPast
+                connectionState = .scanning
+            }
+
+            statusBanner = "已忽略 \(device.deviceName)，已彻底拦截其连接弹窗与自动连接"
+            logger.log("已忽略设备并终止握手: \(device.deviceName) (\(device.deviceId), IP: \(device.lanIP))", category: "Device")
+
+            let targetId = device.deviceId
+            let targetType = device.connectType == 0 ? 16 : device.connectType
+            Task {
+                if !CommandLine.arguments.contains("--self-test") {
+                    dspClient.terminateOtherColorDropProcesses()
+                }
+                await dspClient.enableSenselessDiscovery(false)
+                await dspClient.abortAndBlacklistDevice(deviceId: targetId, connectType: targetType)
+            }
         }
     }
 
@@ -491,7 +554,7 @@ public final class ConnectCoordinator: ObservableObject {
             connectedDevice?.osVersionName = osName
             if !resolution.isEmpty { connectedDevice?.screenResolution = resolution }
             let modelSuffix = model.isEmpty ? "" : " · \(model)"
-            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.1.1"
+            connectedDevice?.systemVersion = "\(osName)\(modelSuffix) · ColorDrop v1.1.2"
         }
     }
 
@@ -1112,36 +1175,42 @@ public final class ConnectCoordinator: ObservableObject {
             dataDict = dict
         }
 
-        if event == "onConnectRequested" {
-            let deviceId = (dataDict["device_id"] as? String)
-                ?? (dataDict["protcol_device_id"] as? String)
-                ?? ""
-            let connectType = (dataDict["connect_type"] as? Int) ?? 0
-            let deviceAddress = (dataDict["device_address"] as? String)
-                ?? (dataDict["connect_address"] as? String)
-                ?? (dataDict["scp_address"] as? String)
-                ?? ""
-            let unmasked = DspIPCClient.unmaskDaemonIP(deviceAddress, localIP: localIP)
-            let ip = unmasked.split(separator: ":").first.map(String.init) ?? ""
-            let deviceName = (dataDict["device_name"] as? String) ?? "手机"
+        let evDeviceId = (dataDict["device_id"] as? String)
+            ?? (dataDict["protcol_device_id"] as? String)
+            ?? (dataDict["protocol_device_id"] as? String)
+            ?? ""
+        let evConnectType = (dataDict["connect_type"] as? Int) ?? 16
+        let evAddress = (dataDict["device_address"] as? String)
+            ?? (dataDict["connect_address"] as? String)
+            ?? (dataDict["scp_address"] as? String)
+            ?? ""
+        let evUnmasked = DspIPCClient.unmaskDaemonIP(evAddress, localIP: localIP)
+        let evIP = evUnmasked.split(separator: ":").first.map(String.init) ?? ""
+        let evName = (dataDict["device_name"] as? String) ?? knownDeviceNameById[evDeviceId] ?? "手机"
 
-            if isDeviceIgnored(deviceId: deviceId, ip: ip) {
-                logger.log("已拦截被忽略设备的连接请求: \(deviceName) (\(deviceId), IP: \(ip))", category: "Connect")
-                _ = try? await dspClient.stopConnection(connectType: connectType == 0 ? 16 : connectType)
+        if ["onConnectRequested", "onRequestConfirm", "onPeerAccepted", "onConnected"].contains(event) {
+            if isDeviceIgnored(deviceId: evDeviceId, ip: evIP) {
+                logger.log("已拦截并终止被忽略设备的连接事件 (\(event)): \(evName) (\(evDeviceId), IP: \(evIP))", level: "WARN", category: "Connect")
+                connectingLockUntil = .distantPast
+                if connectedDevice == nil {
+                    connectionState = .scanning
+                }
+                await dspClient.abortAndBlacklistDevice(deviceId: evDeviceId, connectType: evConnectType == 0 ? 16 : evConnectType)
                 return
             }
+        }
 
+        if event == "onConnectRequested" {
             connectingLockUntil = Date().addingTimeInterval(25.0)
-            statusBanner = "收到 \(deviceName) 的连接请求，正在自动接受..."
-            await dspClient.acceptConnection(deviceId: deviceId, connectType: connectType, deviceAddress: deviceAddress)
+            statusBanner = "收到 \(evName) 的连接请求，正在自动接受..."
+            await dspClient.acceptConnection(deviceId: evDeviceId, connectType: evConnectType, deviceAddress: evAddress)
             return
         }
 
         if event == "onRequestConfirm" {
-            let deviceName = (dataDict["device_name"] as? String) ?? "手机"
             connectingLockUntil = Date().addingTimeInterval(30.0)
             connectionState = .connecting
-            statusBanner = "请在 \(deviceName) 手机弹窗中点击「连接」"
+            statusBanner = "请在 \(evName) 手机弹窗中点击「连接」"
             return
         }
 
@@ -1157,27 +1226,15 @@ public final class ConnectCoordinator: ObservableObject {
             consecutiveICMPFailures = 0
             consecutiveDaemonDisconnectChecks = 0
 
-            let deviceId = (dataDict["device_id"] as? String)
-                ?? (dataDict["protcol_device_id"] as? String)
-                ?? ""
-            let deviceName = (dataDict["device_name"] as? String) ?? knownDeviceNameById[deviceId] ?? "手机"
-            let connectType = (dataDict["connect_type"] as? Int) ?? 16
-            let addrRaw = (dataDict["device_address"] as? String)
-                ?? (dataDict["connect_address"] as? String)
-                ?? (dataDict["scp_address"] as? String)
-                ?? ""
-            let unmasked = DspIPCClient.unmaskDaemonIP(addrRaw, localIP: localIP)
-            let ip = unmasked.split(separator: ":").first.map(String.init) ?? unmasked
-
             await pollDspDaemonDevice()
-            if connectedDevice == nil, !deviceId.isEmpty {
-                let batInfo = lastKnownBatteryByDeviceId[deviceId]
+            if connectedDevice == nil, !evDeviceId.isEmpty, !isDeviceIgnored(deviceId: evDeviceId, ip: evIP) {
+                let batInfo = lastKnownBatteryByDeviceId[evDeviceId]
                 let dev = OppoDevice(
-                    deviceId: deviceId,
-                    deviceName: deviceName,
-                    lanIP: (ip.isEmpty || ip.hasPrefix("*")) ? (knownDeviceIdByIP.first(where: { $0.value == deviceId })?.key ?? localIP) : ip,
+                    deviceId: evDeviceId,
+                    deviceName: evName,
+                    lanIP: (evIP.isEmpty || evIP.hasPrefix("*")) ? (knownDeviceIdByIP.first(where: { $0.value == evDeviceId })?.key ?? localIP) : evIP,
                     port: 10152,
-                    connectType: connectType,
+                    connectType: evConnectType,
                     ssid: currentSSID,
                     batteryLevel: batInfo?.level,
                     isCharging: batInfo?.charging ?? false,
@@ -1624,6 +1681,16 @@ public final class ConnectCoordinator: ObservableObject {
         memoryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                if let pidStr = try? String(contentsOfFile: self.dspClient.pidFilePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+                   let activePid = Int32(pidStr),
+                   activePid > 1 && activePid != ProcessInfo.processInfo.processIdentifier {
+                    exit(0)
+                }
+                let sharedIgnored = self.dspClient.loadSharedIgnoredDevices()
+                if sharedIgnored.ids != self.ignoredDeviceIds || sharedIgnored.ips != self.ignoredDeviceIPs {
+                    self.ignoredDeviceIds.formUnion(sharedIgnored.ids)
+                    self.ignoredDeviceIPs.formUnion(sharedIgnored.ips)
+                }
                 self.periodicTimerTickCount &+= 1
                 self.memoryFootprintMB = max(8.0, MemoryTelemetry.currentFootprintMB())
                 if self.selectedTab == .transfer {
@@ -1738,6 +1805,7 @@ public final class ConnectCoordinator: ObservableObject {
         guard !localPrefix.isEmpty, localPrefix != "127.0.0" else { return }
 
         for (ip, devId) in knownDeviceIdByIP where ip.hasPrefix(localPrefix + ".") && !discovery.isSelfAddress(ip) {
+            guard !isDeviceIgnored(deviceId: devId, ip: ip) else { continue }
             let knownName = knownDeviceNameById[devId] ?? knownDeviceNameByIP[ip]
             discovery.probeDirectPeer(ip: ip, port: 10152, knownName: knownName) { [weak self] dev in
                 guard let self, let dev = dev else { return }
@@ -1786,7 +1854,8 @@ public final class ConnectCoordinator: ObservableObject {
             discovery.updateLocalDeviceId(daemonDevId)
         }
         await dspClient.updateScreenUnlockState()
-        await dspClient.enableSenselessDiscovery(true)
+        // Disable daemon-internal senseless auto-negotiation so ConnectCoordinator's ignore list is 100% authoritative
+        await dspClient.enableSenselessDiscovery(false)
         _ = try? await dspClient.setDiscoveryActive(true)
         let health = await dspClient.probeDevicesAndCheckHealth()
         if !health.healthy, !isRecoveringDaemon {
@@ -1822,12 +1891,21 @@ public final class ConnectCoordinator: ObservableObject {
             return
         }
         upsertDiscoveredDevice(dev)
+        if isDeviceIgnored(dev) {
+            logger.log("轮询检测到被忽略设备处于连接状态，立即终止连接: \(dev.deviceName) (\(dev.deviceId))", level: "WARN", category: "Connect")
+            await dspClient.abortAndBlacklistDevice(deviceId: dev.deviceId, connectType: dev.connectType)
+            return
+        }
         if connectedDevice?.deviceId != dev.deviceId {
             await finalizeConnectedDevice(dev)
         }
     }
 
     private func finalizeConnectedDevice(_ device: OppoDevice) async {
+        guard !isDeviceIgnored(device) else {
+            await dspClient.abortAndBlacklistDevice(deviceId: device.deviceId, connectType: device.connectType)
+            return
+        }
         var connected = enrichDeviceWithKnownMetadata(device)
         connected.ssid = currentSSID
         connected.isPaired = true
@@ -1990,6 +2068,10 @@ public final class ConnectCoordinator: ObservableObject {
         guard !discovery.isSelfAddress(device.lanIP, serviceName: device.deviceName, deviceId: device.deviceId) else {
             return
         }
+        guard !isDeviceIgnored(device) else {
+            statusBanner = "\(device.deviceName) 当前处于已忽略状态，请先点击「已忽略」取消忽略"
+            return
+        }
         userManuallyDisconnected = false
         UserDefaults.standard.set(false, forKey: manualDisconnectDefaultsKey)
         let enriched = enrichDeviceWithKnownMetadata(device)
@@ -1998,6 +2080,7 @@ public final class ConnectCoordinator: ObservableObject {
     }
 
     private func requestDspConnection(to device: OppoDevice) async {
+        guard !isDeviceIgnored(device) else { return }
         connectingLockUntil = Date().addingTimeInterval(25.0)
         lastAutoConnectAttemptByDevice[device.deviceId] = Date()
         connectionState = .connecting
@@ -2022,11 +2105,26 @@ public final class ConnectCoordinator: ObservableObject {
         }
 
         let latestDevice = discoveredDevices.first(where: { $0.lanIP == device.lanIP || $0.deviceId == device.deviceId }) ?? device
+        guard !isDeviceIgnored(latestDevice) && !isDeviceIgnored(device) else {
+            connectingLockUntil = .distantPast
+            if connectedDevice == nil {
+                connectionState = .scanning
+            }
+            return
+        }
         _ = try? await dspClient.requestConnection(to: latestDevice)
         statusBanner = "已向 \(latestDevice.deviceName) 发送连接请求，请在手机弹窗中点击「连接」"
 
         for _ in 0..<40 {
             try? await Task.sleep(nanoseconds: 500_000_000)
+            if isDeviceIgnored(latestDevice) || isDeviceIgnored(device) {
+                await dspClient.abortAndBlacklistDevice(deviceId: latestDevice.deviceId, connectType: latestDevice.connectType)
+                connectingLockUntil = .distantPast
+                if connectedDevice == nil {
+                    connectionState = .scanning
+                }
+                return
+            }
             if connectedDevice != nil {
                 return
             }
@@ -2048,15 +2146,21 @@ public final class ConnectCoordinator: ObservableObject {
         UserDefaults.standard.set(true, forKey: manualDisconnectDefaultsKey)
         connectingLockUntil = Date().addingTimeInterval(5.0)
         let currentType = connectedDevice?.connectType ?? 16
+        let currentId = connectedDevice?.deviceId ?? "000000"
         Task {
             if dspClient.isDaemonAvailable {
-                _ = try? await dspClient.stopConnection(connectType: currentType == 0 ? 16 : currentType)
+                await dspClient.cancelConnection(deviceId: currentId, connectType: currentType == 0 ? 16 : currentType)
+                _ = try? await dspClient.stopConnection(connectType: currentType == 0 ? 16 : currentType, deviceId: currentId, addBlacklist: false)
             }
         }
         handlePeerDisconnected(byUser: true)
     }
 
     private func handlePeerDisconnected(byUser: Bool) {
+        if !byUser && connectedDevice == nil && userManuallyDisconnected {
+            // Ignore trailing daemon onDisconnected callback after the user already manually disconnected
+            return
+        }
         let prevName = connectedDevice?.deviceName ?? "手机"
         connectedDevice = nil
         activeIncomingCall = nil
@@ -2620,7 +2724,7 @@ public final class ConnectCoordinator: ObservableObject {
 
     public func exportDiagnosticLogs() {
         let stateSummary: [String: String] = [
-            "01_软件版本": "ColorDrop v1.1.1",
+            "01_软件版本": "ColorDrop v1.1.2",
             "02_连接状态": connectionState.rawValue,
             "03_当前Wi-Fi": currentSSID,
             "04_本机局域网IP": localIP,

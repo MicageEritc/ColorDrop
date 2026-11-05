@@ -15,11 +15,13 @@ public struct OppoLiteConnectApp {
             ColorDropGUIApp.applyCustomIconIfAvailable()
             return
         }
+        DspIPCClient.shared.terminateOtherColorDropProcesses()
+        usleep(120_000)
         ColorDropGUIApp.main()
     }
 
     private static func runSelfTest() {
-        print("=== ColorDrop v1.1.1 原生自检 ===")
+        print("=== ColorDrop v1.1.2 原生自检 ===")
         let discovery = LanSdpDiscovery()
         print("1. 本地设备 ID: \(discovery.localDeviceId) | 局域网 IP: \(discovery.localIPv4) | 本机IP过滤校验: \(discovery.isSelfAddress(discovery.localIPv4))")
         assert(discovery.isSelfAddress(discovery.localIPv4), "Must filter out Mac's own IP address")
@@ -131,9 +133,19 @@ public struct OppoLiteConnectApp {
         assert(DspIPCClient.shared.locateSourceDaemonBinaryPath() != nil, "O+Connect Service daemon binary must be bundled")
         print("5. 状态栏快传目录 (\(ConnectCoordinator.menuBarDefaultRemoteDirectory))、主界面目录直传与真实文件修改时间解析 (\(parsedItem?.formattedDate ?? "")) 校验通过: FFI加载=\(oshare.isFFILoaded) | 守护进程就绪=\(DspIPCClient.shared.locateSourceDaemonBinaryPath() != nil) | 服务端口=\(String(oshare.localServerPort)) | SSL资源包=\(sslBundlePath)")
 
+        let existingIgnored = DspIPCClient.shared.loadSharedIgnoredDevices()
+        var testIds = existingIgnored.ids
+        var testIps = existingIgnored.ips
+        testIds.insert("TEST_IGNORED_DEVICE_ID")
+        testIps.insert("192.0.2.99")
+        DspIPCClient.shared.saveSharedIgnoredDevices(ids: testIds, ips: testIps)
+        assert(DspIPCClient.shared.isDeviceIgnoredInSharedStore(deviceId: "TEST_IGNORED_DEVICE_ID", ip: ""), "Must block ignored deviceId in shared IPC gatekeeper")
+        assert(DspIPCClient.shared.isDeviceIgnoredInSharedStore(deviceId: "", ip: "*.*.2.99:10152", localIP: "192.0.2.1"), "Must block ignored masked IP in shared IPC gatekeeper")
+        DspIPCClient.shared.saveSharedIgnoredDevices(ids: existingIgnored.ids, ips: existingIgnored.ips)
+
         let memMB = MemoryTelemetry.currentFootprintMB()
-        print(String(format: "6. 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
-        print("=== 全部自检通过 (v1.1.1) ===")
+        print(String(format: "6. 设备忽略拦截与单实例防重连校验通过 | 当前进程物理内存占用 (phys_footprint): %.2f MB", memMB))
+        print("=== 全部自检通过 (v1.1.2) ===")
     }
 }
 

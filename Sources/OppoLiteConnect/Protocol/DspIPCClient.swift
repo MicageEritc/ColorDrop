@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Darwin
 import zlib
 
@@ -11,6 +12,8 @@ public final class DspIPCClient: @unchecked Sendable {
     public let dspSocketPath = "/tmp/oppolite-dspc"
     public let eventSocketPath = "/tmp/oppolite-evnt"
     public let sandboxDirPath = "/tmp/oppolite-oppodat"
+    public let ignoredStoreFilePath = "/tmp/oppolite-oppodat/ignored_devices.json"
+    public let pidFilePath = "/tmp/oppolite-oppodat/colordrop.pid"
     public var runtimeDaemonBinaryPath: String {
         sandboxDirPath + "/O+Connect Service"
     }
@@ -324,6 +327,119 @@ public final class DspIPCClient: @unchecked Sendable {
         osa.waitUntilExit()
     }
 
+    /// Terminates any stale/duplicate ColorDrop (`OppoLiteConnect`) processes running in the background
+    /// so an older background instance can never send `/request_connection` to ignored phones.
+    public func terminateOtherColorDropProcesses() {
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        var killedPids: Set<Int32> = []
+
+        for bundleId in ["com.colordrop.mac", "com.oppolite.connect"] {
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleId) where app.processIdentifier != myPid {
+                let pid = app.processIdentifier
+                _ = app.forceTerminate()
+                Darwin.kill(pid, SIGKILL)
+                killedPids.insert(pid)
+            }
+        }
+
+        for app in NSWorkspace.shared.runningApplications where app.processIdentifier != myPid {
+            let execName = app.executableURL?.lastPathComponent ?? ""
+            let locName = app.localizedName ?? ""
+            if execName == "OppoLiteConnect" || locName == "ColorDrop" {
+                let pid = app.processIdentifier
+                _ = app.forceTerminate()
+                Darwin.kill(pid, SIGKILL)
+                killedPids.insert(pid)
+            }
+        }
+
+        if let pidStr = try? String(contentsOfFile: pidFilePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let oldPid = Int32(pidStr),
+           oldPid > 1 && oldPid != myPid {
+            if Darwin.kill(oldPid, SIGKILL) == 0 {
+                killedPids.insert(oldPid)
+            }
+        }
+
+        let candidateLogDirs = ["/tmp/devicespace", "/tmp/oppolite-dsplogs-daemon"]
+        for dir in candidateLogDirs {
+            guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
+            for file in files.filter({ $0.hasSuffix(".log") && !$0.contains("crash") }).sorted().suffix(2) {
+                let fullPath = "\(dir)/\(file)"
+                guard let handle = FileHandle(forReadingAtPath: fullPath) else { continue }
+                defer { try? handle.close() }
+                let fileSize = (try? handle.seekToEnd()) ?? 0
+                let readBytes: UInt64 = min(fileSize, 256_000)
+                try? handle.seek(toOffset: fileSize - readBytes)
+                guard let data = try? handle.readToEnd(),
+                      let text = String(data: data, encoding: .utf8) else { continue }
+                for line in text.split(separator: "\n") where line.contains("Process=Some(\"OppoLiteConnect\")") {
+                    if let range = line.range(of: "PID=") {
+                        let after = line[range.upperBound...]
+                        let digits = after.prefix(while: { $0.isNumber })
+                        if let parsedPid = Int32(digits), parsedPid > 1 && parsedPid != myPid {
+                            if Darwin.kill(parsedPid, SIGKILL) == 0 {
+                                killedPids.insert(parsedPid)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        try? String(myPid).write(toFile: pidFilePath, atomically: true, encoding: .utf8)
+        chmod(pidFilePath, 0o666)
+        if !killedPids.isEmpty {
+            DiagnosticLogService.shared.log("已清理后台残留旧版 ColorDrop 进程: PID=\(Array(killedPids).sorted())", level: "WARN", category: "Lifecycle")
+        }
+    }
+
+    // MARK: - Shared Persistent Ignore List (`/tmp/oppolite-oppodat/ignored_devices.json`)
+
+    public func saveSharedIgnoredDevices(ids: Set<String>, ips: Set<String>) {
+        let payload: [String: [String]] = [
+            "ids": Array(ids).sorted(),
+            "ips": Array(ips).sorted()
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
+            try? data.write(to: URL(fileURLWithPath: ignoredStoreFilePath), options: .atomic)
+            chmod(ignoredStoreFilePath, 0o666)
+        }
+    }
+
+    public func loadSharedIgnoredDevices() -> (ids: Set<String>, ips: Set<String>) {
+        var ids = Set(UserDefaults.standard.stringArray(forKey: "ColorDrop.IgnoredDeviceIds") ?? [])
+        var ips = Set(UserDefaults.standard.stringArray(forKey: "ColorDrop.IgnoredDeviceIPs") ?? [])
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: ignoredStoreFilePath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let fileIds = json["ids"] as? [String] {
+                ids.formUnion(fileIds)
+            }
+            if let fileIps = json["ips"] as? [String] {
+                ips.formUnion(fileIps)
+            }
+        }
+        return (ids, ips)
+    }
+
+    public func isDeviceIgnoredInSharedStore(deviceId: String, ip: String, localIP: String = "") -> Bool {
+        let store = loadSharedIgnoredDevices()
+        if !deviceId.isEmpty && store.ids.contains(deviceId) {
+            return true
+        }
+        let unmasked = Self.unmaskDaemonIP(ip, localIP: localIP)
+        let cleanIP = unmasked.split(separator: ":").first.map(String.init) ?? unmasked
+        if !cleanIP.isEmpty && store.ips.contains(cleanIP) {
+            return true
+        }
+        if let byIP = UserDefaults.standard.dictionary(forKey: "OppoLite.PairedDeviceIdsByIP") as? [String: String],
+           let mappedId = byIP[cleanIP],
+           store.ids.contains(mappedId) {
+            return true
+        }
+        return false
+    }
+
     /// Cleanly terminates the daemon and removes Unix sockets when ColorDrop quits so no orphan daemon is left running.
     public func terminateDaemonOnAppQuit() {
         DiagnosticLogService.shared.log("应用退出，正在清理守护进程与残留 Socket", category: "Daemon")
@@ -337,6 +453,7 @@ public final class DspIPCClient: @unchecked Sendable {
         killer.waitUntilExit()
         unlink(dspSocketPath)
         unlink(eventSocketPath)
+        unlink(pidFilePath)
     }
 
     private func markNeedsDaemonRestart() {
@@ -925,6 +1042,11 @@ public final class DspIPCClient: @unchecked Sendable {
         } else {
             validDeviceId = device.deviceId
         }
+        if isDeviceIgnoredInSharedStore(deviceId: device.deviceId, ip: device.lanIP)
+            || isDeviceIgnoredInSharedStore(deviceId: validDeviceId, ip: device.lanIP) {
+            DiagnosticLogService.shared.log("IPC层已拦截向被忽略设备发起连接: \(device.deviceName) (\(validDeviceId), IP: \(device.lanIP))", level: "WARN", category: "Connect")
+            return ["status": -1, "msg": "device is ignored"]
+        }
         let primaryType = device.connectType == 0 ? 16 : device.connectType
         let payload: [String: Any] = [
             "connect_type": primaryType,
@@ -938,6 +1060,10 @@ public final class DspIPCClient: @unchecked Sendable {
     }
 
     public func acceptConnection(deviceId: String, connectType: Int, deviceAddress: String) async {
+        if isDeviceIgnoredInSharedStore(deviceId: deviceId, ip: deviceAddress) {
+            await rejectConnection(deviceId: deviceId, connectType: connectType)
+            return
+        }
         let payload: [String: Any] = [
             "connect_type": connectType,
             "device_id": deviceId,
@@ -947,9 +1073,50 @@ public final class DspIPCClient: @unchecked Sendable {
         _ = try? await request(path: uri, timeoutMs: 4000)
     }
 
-    public func stopConnection(connectType: Int = 16) async throws -> [String: Any] {
-        let uri = buildIpcUri(path: "/stop_connection", scope: 1, params: ["connect_type": connectType])
+    public func rejectConnection(deviceId: String, connectType: Int = 16) async {
+        let payload: [String: Any] = [
+            "connect_type": connectType == 0 ? 16 : connectType,
+            "device_id": deviceId.isEmpty ? "000000" : deviceId
+        ]
+        let uri = buildIpcUri(path: "/reject_connection", scope: 1, params: payload)
+        _ = try? await request(path: uri, timeoutMs: 2500)
+    }
+
+    public func cancelConnection(deviceId: String, connectType: Int = 16) async {
+        let payload: [String: Any] = [
+            "connect_type": connectType == 0 ? 16 : connectType,
+            "device_id": deviceId.isEmpty ? "000000" : deviceId,
+            "usb_serial": ""
+        ]
+        let uri = buildIpcUri(path: "/cancel_connection", scope: 1, params: payload)
+        _ = try? await request(path: uri, timeoutMs: 2500)
+    }
+
+    public func cancelAllConnections() async {
+        let uri = buildIpcUri(path: "/cancel_all_connection", scope: 1, params: nil)
+        _ = try? await request(path: uri, timeoutMs: 2500)
+    }
+
+    public func stopConnection(connectType: Int = 16, deviceId: String = "000000", addBlacklist: Bool = false) async throws -> [String: Any] {
+        let payload: [String: Any] = [
+            "connect_type": connectType == 0 ? 16 : connectType,
+            "device_id": deviceId.isEmpty ? "000000" : deviceId,
+            "add_blacklist": addBlacklist,
+            "is_sticky": false
+        ]
+        let uri = buildIpcUri(path: "/stop_connection", scope: 1, params: payload)
         return try await request(path: uri, timeoutMs: 3000)
+    }
+
+    /// Immediately aborts any in-flight SCP handshake / phone popup and adds the device to the daemon blacklist.
+    public func abortAndBlacklistDevice(deviceId: String, connectType: Int = 16) async {
+        guard isDaemonAvailable else { return }
+        let effectiveType = connectType == 0 ? 16 : connectType
+        let cleanId = deviceId.isEmpty ? "000000" : deviceId
+        await rejectConnection(deviceId: cleanId, connectType: effectiveType)
+        await cancelConnection(deviceId: cleanId, connectType: effectiveType)
+        await cancelAllConnections()
+        _ = try? await stopConnection(connectType: effectiveType, deviceId: cleanId, addBlacklist: true)
     }
 
     // MARK: - MacChannelService Agent APIs (File Manager & OShare Handshake)
