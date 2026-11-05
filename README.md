@@ -4,7 +4,7 @@
 
 **使用 100% 原生 Swift / SwiftUI 编写的轻量化 macOS 局域网手机互联辅助工具**
 
-[![Version](https://img.shields.io/badge/Version-v1.1.0-0A84FF?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Version-v1.1.2-0A84FF?style=flat-square)](#)
 [![Platform](https://img.shields.io/badge/Platform-macOS-4A90E2?style=flat-square)](#)
 [![Swift](https://img.shields.io/badge/Built%20with-Swift%20%2F%20SwiftUI-F05138?style=flat-square&logo=swift)](#)
 [![License](https://img.shields.io/badge/License-MIT-2ECC71?style=flat-square)](#)
