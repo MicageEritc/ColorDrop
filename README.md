@@ -115,9 +115,13 @@ chmod +x build_app.sh
 
 ```text
 ColorDrop/
+├── .github/workflows/
+│   └── release-dmg.yml                # GitHub Actions：发布 Release 时自动构建 arm64 DMG、跑自检并附加到 Release
 ├── Package.swift
 ├── README.md
 ├── build_app.sh
+├── UI/
+│   └── 设备主界面.png                 # 「界面预览」章节引用的界面截图
 ├── Vendor/
 │   ├── iconbase_192.png                      # 应用图标素材
 │   ├── runtime.tar.xz                        # 跨端互联基础通信与传输动态库压缩包
@@ -133,6 +137,7 @@ ColorDrop/
         │   └── OShareEngine.swift            # 高速文件互传桥接与接收目录监听
         ├── Services/
         │   ├── ConnectCoordinator.swift      # 核心状态协调器（连接、镜像、传输、剪切板与消息）
+        │   ├── DiagnosticLogService.swift    # 结构化运行日志与一键导出诊断报告
         │   ├── ScreenMirrorService.swift     # 手机屏幕镜像与 Mac 键鼠反控服务
         │   └── SMSNotificationService.swift  # 短信验证码提取与 macOS 原生通知栏来电挂断服务
         └── Views/
@@ -140,6 +145,8 @@ ColorDrop/
             ├── MenuBarConnectView.swift      # 顶部菜单栏快捷弹窗视图
             └── StatusBarDropController.swift # 状态栏拖拽感应悬浮小虚拟窗控制器
 ```
+
+> **Vendor 解压产物说明**：`build_app.sh` 会从 `runtime.tar.xz` / `mirror.tar.xz` 解出 `O+ Connect Service`、`libOshareLib.dylib`、`OshareLibBundle.bundle` 与 `手机投屏.app`，并复制进 `ColorDrop.app/Contents/Resources/` 随包分发。这些解压出的二进制体积较大，已在 `.gitignore` 中忽略、不纳入版本库，因此没有列在上面的目录树里；仓库只保留两个压缩包，构建时按需重建。
 
 ## 免责声明与非官方声明
 
